@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "agentx"
+version = "0.1.0"
+description = "Provider-neutral command-line gateway for agentic coding"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+agentx = "agentx.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
