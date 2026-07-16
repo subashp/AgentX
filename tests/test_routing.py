@@ -2,6 +2,7 @@ import unittest
 from pathlib import Path
 
 from agentx.config import AgentXPaths, Settings
+from agentx.models import ModelCatalog
 from agentx.providers import ProviderStatus
 from agentx.routing import AgentRun, RouteValidationError, Router
 
@@ -15,6 +16,25 @@ def settings(public_providers=()):
         auth=Path("/state/auth"),
     )
     return Settings(paths=paths, public_providers=tuple(public_providers))
+
+
+def model_profile(provider_id, model_id, tier, cost_profile="economy", tool_support=True):
+    return {
+        "provider_id": provider_id,
+        "model_id": model_id,
+        "tier": tier,
+        "capability_score": 80,
+        "cost_profile": cost_profile,
+        "latency_profile": "standard",
+        "context_limit": 128000,
+        "tool_support": tool_support,
+        "structured_output_support": True,
+        "privacy_clearance": "internal",
+        "best_for": [tier],
+        "not_for": [],
+        "metadata_source": "test",
+        "metadata_updated_at": "2026-07-01",
+    }
 
 
 class RouterTests(unittest.TestCase):
@@ -130,6 +150,67 @@ class RouterTests(unittest.TestCase):
 
         self.assertEqual("claude", decision.selected_provider)
         self.assertEqual("not_in_public_provider_defaults", decision.rejected_providers["codex"])
+
+    def test_router_selects_lowest_cost_catalog_model(self):
+        catalog = ModelCatalog.from_dicts(
+            [
+                model_profile("codex", "codex-standard", "standard", cost_profile="standard"),
+                model_profile("codex", "codex-economy", "economy", cost_profile="economy"),
+                model_profile("claude", "claude-standard", "standard", cost_profile="premium"),
+            ]
+        )
+
+        decision = Router(
+            settings(),
+            (
+                ProviderStatus("codex", "Codex", "cli", True, "available"),
+                ProviderStatus("claude", "Claude", "cli", True, "available"),
+            ),
+            model_catalog=catalog,
+        ).explain(AgentRun(prompt="write tests", mode="tests"))
+
+        self.assertEqual("codex", decision.selected_provider)
+        self.assertEqual("codex-economy", decision.selected_model_id)
+        self.assertEqual("economy", decision.required_model_tier)
+        self.assertEqual("selected_lowest_cost_eligible_model", decision.reason)
+
+    def test_router_uses_high_tier_for_complexity_hint_with_catalog(self):
+        catalog = ModelCatalog.from_dicts(
+            [
+                model_profile("codex", "codex-standard", "standard", cost_profile="economy"),
+                model_profile("codex", "codex-high", "high", cost_profile="premium"),
+            ]
+        )
+
+        decision = Router(
+            settings(),
+            (ProviderStatus("codex", "Codex", "cli", True, "available"),),
+            model_catalog=catalog,
+        ).explain(
+            AgentRun(
+                prompt="execute this migration",
+                mode="execute",
+                task_hints=["architecture planning"],
+            )
+        )
+
+        self.assertEqual("high", decision.required_model_tier)
+        self.assertEqual("codex-high", decision.selected_model_id)
+
+    def test_router_rejects_provider_without_matching_catalog_model(self):
+        catalog = ModelCatalog.from_dicts(
+            [model_profile("codex", "codex-economy", "economy", tool_support=False)]
+        )
+
+        decision = Router(
+            settings(),
+            (ProviderStatus("codex", "Codex", "cli", True, "available"),),
+            model_catalog=catalog,
+        ).explain(AgentRun(prompt="run shell task", mode="execute", required_tools=["shell"]))
+
+        self.assertIsNone(decision.selected_provider)
+        self.assertEqual("no_eligible_provider", decision.reason)
+        self.assertEqual("no_matching_model", decision.rejected_providers["codex"])
 
 
 if __name__ == "__main__":
