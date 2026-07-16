@@ -3,11 +3,12 @@ from pathlib import Path
 
 from agentx.config import AgentXPaths, Settings
 from agentx.models import ModelCatalog
+from agentx.policy import Policy
 from agentx.providers import ProviderStatus
 from agentx.routing import AgentRun, RouteValidationError, Router
 
 
-def settings(public_providers=()):
+def settings(public_providers=(), private_provider=None):
     paths = AgentXPaths(
         root=Path("/state"),
         settings=Path("/state/settings.json"),
@@ -15,7 +16,11 @@ def settings(public_providers=()):
         memories=Path("/state/memories"),
         auth=Path("/state/auth"),
     )
-    return Settings(paths=paths, public_providers=tuple(public_providers))
+    return Settings(
+        paths=paths,
+        public_providers=tuple(public_providers),
+        private_provider=private_provider,
+    )
 
 
 def model_profile(provider_id, model_id, tier, cost_profile="economy", tool_support=True):
@@ -211,6 +216,49 @@ class RouterTests(unittest.TestCase):
         self.assertIsNone(decision.selected_provider)
         self.assertEqual("no_eligible_provider", decision.reason)
         self.assertEqual("no_matching_model", decision.rejected_providers["codex"])
+
+    def test_router_filters_external_providers_for_confidential_paths(self):
+        policy = Policy(
+            private_provider="private-local",
+            classification_rules={"src/customer/**": "confidential"},
+            routing={"confidential": ("private-local",)},
+        )
+
+        decision = Router(
+            settings(public_providers=("codex", "claude"), private_provider="private-local"),
+            (
+                ProviderStatus("codex", "Codex", "cli", True, "available"),
+                ProviderStatus("claude", "Claude", "cli", True, "available"),
+                ProviderStatus(
+                    "private-local",
+                    "Private Local",
+                    "openai_compatible",
+                    True,
+                    "available",
+                ),
+            ),
+            policy=policy,
+        ).explain(
+            AgentRun(
+                prompt="review customer flow",
+                context_paths=["src/customer/account.py"],
+            )
+        )
+
+        self.assertEqual("private-local", decision.selected_provider)
+        self.assertEqual(
+            "classification_exceeds_external_max",
+            decision.rejected_providers["codex"],
+        )
+        self.assertEqual(
+            "classification_exceeds_external_max",
+            decision.rejected_providers["claude"],
+        )
+        self.assertEqual(("private-local",), decision.eligible_providers)
+        self.assertIn(
+            "src/customer/account.py:confidential",
+            decision.provider_reports[0].detail,
+        )
 
 
 if __name__ == "__main__":

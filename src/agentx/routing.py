@@ -11,6 +11,7 @@ from .models import (
     ModelSelection,
     classify_task_complexity,
 )
+from .policy import Policy, ProviderEligibility
 from .providers import ProviderStatus
 
 
@@ -90,6 +91,7 @@ class AgentRun:
     required_mcp_servers: tuple[str, ...] = ()
     required_mcp_tools: tuple[str, ...] = ()
     task_hints: tuple[str, ...] = ()
+    context_paths: tuple[str, ...] = ()
     require_structured_output: bool = False
 
     def __post_init__(self) -> None:
@@ -126,6 +128,11 @@ class AgentRun:
         )
         object.__setattr__(
             self,
+            "context_paths",
+            _normalize_string_collection(self.context_paths, "context_paths"),
+        )
+        object.__setattr__(
+            self,
             "require_structured_output",
             _normalize_bool(self.require_structured_output, "require_structured_output"),
         )
@@ -141,6 +148,7 @@ class AgentRun:
             "required_mcp_servers": list(self.required_mcp_servers),
             "required_mcp_tools": list(self.required_mcp_tools),
             "task_hints": list(self.task_hints),
+            "context_paths": list(self.context_paths),
             "require_structured_output": self.require_structured_output,
         }
 
@@ -220,12 +228,14 @@ class Router:
         *,
         today: date | None = None,
         stale_metadata_max_age_days: int = DEFAULT_STALE_METADATA_DAYS,
+        policy: Policy | None = None,
     ) -> None:
         self._settings = settings
         self._providers = providers
         self._model_catalog = model_catalog
         self._today = today
         self._stale_metadata_max_age_days = stale_metadata_max_age_days
+        self._policy = policy
 
     def explain(self, run: AgentRun) -> RouteDecision:
         default_tier = DEFAULT_MODEL_TIERS.get(run.mode, "standard")
@@ -246,6 +256,7 @@ class Router:
         require_tools = bool(
             run.required_tools or run.required_mcp_servers or run.required_mcp_tools
         )
+        policy_eligibility = self._evaluate_policy_eligibility(run)
 
         for index, provider in enumerate(self._providers):
             eligible_provider = False
@@ -256,7 +267,17 @@ class Router:
             elif run.provider != "auto" and provider.id != run.provider:
                 reason = "not_requested_provider"
                 detail = f"Provider was not requested; requested provider is '{run.provider}'."
-            elif self._settings.public_providers and provider.id not in self._settings.public_providers:
+            elif (
+                policy_eligibility is not None
+                and provider.id in policy_eligibility.rejected_providers
+            ):
+                reason = policy_eligibility.rejected_providers[provider.id]
+                detail = _build_policy_detail(policy_eligibility)
+            elif self._settings.public_providers and not _provider_allowed_by_defaults(
+                provider.id,
+                self._settings,
+                self._policy,
+            ):
                 reason = "not_in_public_provider_defaults"
                 detail = "Provider is excluded by settings.public_providers."
             elif self._model_catalog is not None:
@@ -355,6 +376,24 @@ class Router:
                 provider_reports=tuple(provider_reports),
                 model_metadata_warnings=model_metadata_warnings,
             ),
+        )
+
+    def _evaluate_policy_eligibility(self, run: AgentRun) -> ProviderEligibility | None:
+        if self._policy is None or not run.context_paths:
+            return None
+        public_provider_ids = set(self._settings.public_providers)
+        if not public_provider_ids:
+            public_provider_ids = {
+                provider.id
+                for provider in self._providers
+                if provider.id != self._policy.private_provider
+                and provider.kind != "openai_compatible"
+                and not provider.id.startswith("private")
+            }
+        return self._policy.evaluate_provider_eligibility(
+            [provider.id for provider in self._providers],
+            run.context_paths,
+            public_provider_ids=public_provider_ids,
         )
 
 
@@ -493,6 +532,29 @@ def _build_selected_model_detail(selection: ModelSelection) -> str:
     if selection.stale_warnings:
         detail += " " + " ".join(selection.stale_warnings)
     return detail
+
+
+def _build_policy_detail(policy_eligibility: ProviderEligibility) -> str:
+    if not policy_eligibility.classifications:
+        return "Provider is excluded by policy."
+    classification_summary = ", ".join(
+        f"{entry.normalized_path}:{entry.classification or 'unclassified'}"
+        for entry in policy_eligibility.classifications
+    )
+    return f"Provider is excluded by policy classification constraints. Paths: {classification_summary}."
+
+
+def _provider_allowed_by_defaults(
+    provider_id: str,
+    settings: Settings,
+    policy: Policy | None,
+) -> bool:
+    if provider_id in settings.public_providers:
+        return True
+    private_provider = settings.private_provider
+    if private_provider is None and policy is not None:
+        private_provider = policy.private_provider
+    return provider_id == private_provider
 
 
 def _build_explanation(
