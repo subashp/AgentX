@@ -1,9 +1,12 @@
 import io
 import json
+import shutil
 import unittest
+from pathlib import Path
 from unittest import mock
 
 from agentx import cli
+from agentx.config import AgentXPaths, Settings
 
 
 class CliTests(unittest.TestCase):
@@ -78,6 +81,57 @@ class CliTests(unittest.TestCase):
         load_settings.assert_called_once()
         payload = json.loads(stdout.getvalue())
         self.assertTrue(any(provider["id"] == "codex" for provider in payload))
+
+    def test_run_fake_writes_artifacts_without_provider_registry(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_fake"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                )
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                    registry.side_effect = AssertionError("provider registry was used")
+                    code = cli.run(
+                        [
+                            "--json",
+                            "run",
+                            "--fake",
+                            "--session-id",
+                            "cli-fake",
+                            "--mode",
+                            "execute",
+                            "local dry run",
+                        ],
+                        stdout,
+                        stderr,
+                    )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual("cli-fake", payload["session_id"])
+            self.assertEqual("success", payload["result"]["status"])
+            self.assertEqual("fake-local", payload["result"]["provider_id"])
+            self.assertTrue((root / "sessions" / "cli-fake" / "manifest.json").exists())
+            self.assertEqual(
+                "local dry run\n",
+                (root / "sessions" / "cli-fake" / "prompt.md").read_text(encoding="utf-8"),
+            )
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
 
 
 if __name__ == "__main__":

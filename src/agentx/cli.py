@@ -5,9 +5,11 @@ import json
 import sys
 from typing import Sequence, TextIO
 
+from .adapters import AdapterError, execute_fake_run
 from .config import ConfigError, load_settings
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
+from .store import SessionStore
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -26,6 +28,13 @@ def build_parser() -> argparse.ArgumentParser:
     route.add_argument("--mode", default="plan", help="task mode")
     route.add_argument("--model-tier", default=None, help="model tier override")
     route.add_argument("prompt", nargs="?", default="", help="task prompt")
+
+    run = subparsers.add_parser("run", help="execute a local agent run")
+    run.add_argument("--fake", action="store_true", help="use the deterministic local fake adapter")
+    run.add_argument("--session-id", default="local-fake-run", help="local session/run id")
+    run.add_argument("--mode", default="plan", help="task mode")
+    run.add_argument("--model-tier", default=None, help="model tier override")
+    run.add_argument("prompt", nargs="?", default="", help="task prompt")
 
     config = subparsers.add_parser("config", help="inspect configuration")
     config_sub = config.add_subparsers(dest="config_command")
@@ -97,6 +106,21 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
             stderr,
         )
 
+    if args.command == "run":
+        if not args.fake:
+            stderr.write("agentx: run currently supports only --fake local execution.\n")
+            return 2
+        return _fake_run(
+            args.prompt,
+            args.mode,
+            args.model_tier,
+            args.session_id,
+            settings,
+            args.json,
+            stdout,
+            stderr,
+        )
+
     if args.command == "config" and args.config_command == "show":
         return _write(settings.as_dict(), args.json, stdout)
 
@@ -114,7 +138,7 @@ def _prompt_shorthand(argv: Sequence[str]) -> tuple[bool, str] | None:
         json_output = True
         tokens = tokens[1:]
 
-    if not tokens or tokens[0] in {"providers", "route", "config", "-h", "--help"}:
+    if not tokens or tokens[0] in {"providers", "route", "run", "config", "-h", "--help"}:
         return None
 
     if tokens[0].startswith("-"):
@@ -144,6 +168,40 @@ def _route(
     return _write(decision.as_dict(), json_output, stdout)
 
 
+def _fake_run(
+    prompt: str,
+    mode: str,
+    model_tier: str | None,
+    session_id: str,
+    settings,
+    json_output: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    try:
+        run = AgentRun(
+            prompt=prompt,
+            mode=mode,
+            provider="fake-local",
+            model_tier=model_tier,
+        )
+        stored = execute_fake_run(
+            session_store=SessionStore(settings.paths),
+            session_id=session_id,
+            run=run,
+        )
+    except (AdapterError, RouteValidationError) as exc:
+        stderr.write(f"agentx: {exc}\n")
+        return 2
+
+    return _write(
+        stored.as_dict(),
+        json_output,
+        stdout,
+        text_formatter=_format_fake_run,
+    )
+
+
 def _write(value, json_output: bool, stdout: TextIO, text_formatter=None) -> int:
     if json_output:
         stdout.write(json.dumps(value, indent=2, sort_keys=True))
@@ -165,3 +223,7 @@ def _format_providers(statuses: list[dict[str, object]]) -> str:
         enabled = "enabled" if status["enabled"] else "disabled"
         lines.append(f"{status['id']}\t{enabled}\t{status['reason']}")
     return "\n".join(lines) + "\n"
+
+
+def _format_fake_run(payload: dict[str, object]) -> str:
+    return f"wrote fake run artifacts to {payload['root']}\n"
