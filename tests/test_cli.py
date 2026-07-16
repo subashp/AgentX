@@ -133,6 +133,18 @@ class CliTests(unittest.TestCase):
             if root.exists():
                 shutil.rmtree(root)
 
+    def test_run_fake_reports_storage_failure_without_traceback(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with mock.patch("agentx.cli.execute_fake_run", side_effect=OSError("storage unavailable")):
+            code = cli.run(["run", "--fake", "local dry run"], stdout, stderr)
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("agentx: storage unavailable", stderr.getvalue())
+        self.assertNotIn("Traceback", stderr.getvalue())
+
 
 if __name__ == "__main__":
     unittest.main()

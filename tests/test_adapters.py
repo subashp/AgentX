@@ -4,7 +4,14 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentx.adapters import AdapterResult, execute_fake_run
+from agentx.adapters import (
+    AdapterRequest,
+    AdapterResult,
+    CodexCliAdapter,
+    ProcessResult,
+    execute_adapter_run,
+    execute_fake_run,
+)
 from agentx.config import AgentXPaths
 from agentx.routing import AgentRun
 from agentx.store import RUN_ARTIFACT_FILES, SessionStore
@@ -135,6 +142,126 @@ class FakeLocalAdapterTests(AdapterFixtureTestCase):
         self.assertTrue((stored.root / "manifest.json").exists())
         self.assertEqual("success", stored.result.status)
         self.assertIsInstance(stored.result, AdapterResult)
+
+
+class CodexCliAdapterTests(AdapterFixtureTestCase):
+    def test_codex_cli_adapter_constructs_plan_command_and_forwards_process_options(self):
+        runner = RecordingProcessRunner(ProcessResult(exit_code=0, stdout="plan", stderr="note"))
+        adapter = CodexCliAdapter(
+            command="codex-under-test",
+            extra_args=("--model", "gpt-test"),
+            cwd=Path("repo-root"),
+            env={"AGENTX_TEST": "1"},
+            timeout=12.5,
+            process_runner=runner,
+            model_id="codex-model",
+        )
+        run = AgentRun(
+            prompt="Implement AX-008",
+            mode="plan",
+            provider="codex",
+            model_tier="high",
+            context_paths=("src/agentx/adapters.py",),
+            task_hints=("plan only",),
+        )
+
+        result = adapter.execute(AdapterRequest(run=run))
+
+        self.assertEqual("success", result.status)
+        self.assertEqual("codex", result.provider_id)
+        self.assertEqual("codex-model", result.model_id)
+        self.assertEqual(1, len(runner.calls))
+        call = runner.calls[0]
+        self.assertEqual(Path("repo-root"), call["cwd"])
+        self.assertEqual({"AGENTX_TEST": "1"}, call["env"])
+        self.assertEqual(12.5, call["timeout"])
+        argv = call["argv"]
+        self.assertEqual("codex-under-test", argv[0])
+        self.assertEqual(
+            (
+                "codex-under-test",
+                "exec",
+                "--sandbox",
+                "read-only",
+                "--ask-for-approval",
+                "never",
+                "--model",
+                "gpt-test",
+            ),
+            argv[:-1],
+        )
+        self.assertIn("Do not edit files", argv[-1])
+        self.assertIn("Context paths:\n- src/agentx/adapters.py", argv[-1])
+        self.assertIn("User prompt:\nImplement AX-008", argv[-1])
+        output_event = result.transcript_events[1]
+        self.assertEqual("process_output_captured", output_event["event"])
+        self.assertEqual("plan", output_event["stdout"])
+        self.assertEqual("note", output_event["stderr"])
+
+    def test_codex_cli_adapter_maps_nonzero_exit_to_failure(self):
+        runner = RecordingProcessRunner(ProcessResult(exit_code=7, stdout="", stderr="denied"))
+        adapter = CodexCliAdapter(command="codex-test", process_runner=runner)
+        run = AgentRun(prompt="Review this", mode="review", provider="codex")
+
+        result = adapter.execute(AdapterRequest(run=run))
+
+        self.assertEqual("failure", result.status)
+        self.assertEqual("failure", result.outcome["status"])
+        self.assertEqual("codex_cli_failed", result.outcome["outcome"])
+        self.assertEqual(7, result.outcome["exit_code"])
+        self.assertEqual("", result.patch)
+
+    def test_execute_adapter_run_writes_codex_cli_artifacts_without_live_process(self):
+        paths = self.make_paths()
+        runner = RecordingProcessRunner(ProcessResult(exit_code=0, stdout="1. inspect\n", stderr=""))
+        adapter = CodexCliAdapter(command="codex-test", process_runner=runner, timeout=9.0)
+        run = AgentRun(prompt="Plan the adapter", mode="plan", provider="codex")
+
+        stored = execute_adapter_run(
+            session_store=SessionStore(paths),
+            session_id="codex-adapter",
+            run=run,
+            adapter=adapter,
+        )
+
+        snapshot = _read_artifacts(stored.root)
+        self.assertEqual("", snapshot["patch.diff"])
+        provider = json.loads(snapshot["provider.json"])
+        self.assertEqual("codex", provider["provider_id"])
+        self.assertEqual("success", provider["status"])
+        self.assertEqual("success", json.loads(snapshot["outcome.json"])["status"])
+        self.assertEqual(
+            {
+                "currency": "USD",
+                "estimated": False,
+                "input_tokens": 0,
+                "known": False,
+                "output_tokens": 0,
+                "total_cost_usd": 0.0,
+            },
+            json.loads(snapshot["cost.json"]),
+        )
+        transcript = [json.loads(line) for line in snapshot["transcript.jsonl"].splitlines()]
+        self.assertEqual(["execution_started", "process_output_captured", "execution_completed"], [event["event"] for event in transcript])
+        self.assertEqual("1. inspect\n", transcript[1]["stdout"])
+        self.assertEqual(9.0, runner.calls[0]["timeout"])
+
+
+class RecordingProcessRunner:
+    def __init__(self, result: ProcessResult) -> None:
+        self.result = result
+        self.calls: list[dict[str, object]] = []
+
+    def run(self, argv, *, cwd=None, env=None, timeout=None):
+        self.calls.append(
+            {
+                "argv": tuple(argv),
+                "cwd": cwd,
+                "env": None if env is None else dict(env),
+                "timeout": timeout,
+            }
+        )
+        return self.result
 
 
 def _read_artifacts(root: Path) -> dict[str, str]:

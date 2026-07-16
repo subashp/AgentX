@@ -9,7 +9,7 @@ from .adapters import AdapterError, execute_fake_run
 from .config import ConfigError, load_settings
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
-from .store import SessionStore
+from .store import SessionStore, StoreError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -190,7 +190,7 @@ def _fake_run(
             session_id=session_id,
             run=run,
         )
-    except (AdapterError, RouteValidationError) as exc:
+    except (AdapterError, RouteValidationError, StoreError, OSError) as exc:
         stderr.write(f"agentx: {exc}\n")
         return 2
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
@@ -20,6 +21,79 @@ class ProviderAdapter(Protocol):
 
     def execute(self, request: "AdapterRequest") -> "AdapterResult":
         """Execute the request and return structured local result data."""
+
+
+@dataclass(frozen=True)
+class ProcessResult:
+    exit_code: int
+    stdout: str = ""
+    stderr: str = ""
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.exit_code, int) or isinstance(self.exit_code, bool):
+            raise AdapterError("exit_code must be an integer.")
+        if not isinstance(self.stdout, str):
+            raise AdapterError("stdout must be a string.")
+        if not isinstance(self.stderr, str):
+            raise AdapterError("stderr must be a string.")
+
+
+class ProcessRunner(Protocol):
+    """Platform-neutral process execution boundary for CLI adapters."""
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> ProcessResult:
+        """Run argv without a shell and return captured process output."""
+
+
+@dataclass(frozen=True)
+class SubprocessRunner:
+    """Stdlib implementation of ProcessRunner."""
+
+    def run(
+        self,
+        argv: Sequence[str],
+        *,
+        cwd: str | Path | None = None,
+        env: Mapping[str, str] | None = None,
+        timeout: float | None = None,
+    ) -> ProcessResult:
+        normalized_argv = _normalize_string_sequence(argv, "argv")
+        try:
+            completed = subprocess.run(
+                list(normalized_argv),
+                cwd=None if cwd is None else str(cwd),
+                env=None if env is None else dict(env),
+                timeout=timeout,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            return ProcessResult(
+                exit_code=124,
+                stdout=_timeout_output_to_string(exc.stdout),
+                stderr=_timeout_output_to_string(exc.stderr)
+                or f"process timed out after {timeout} seconds",
+            )
+        except FileNotFoundError as exc:
+            return ProcessResult(exit_code=127, stderr=str(exc))
+        except OSError as exc:
+            return ProcessResult(exit_code=126, stderr=str(exc))
+
+        return ProcessResult(
+            exit_code=completed.returncode,
+            stdout=completed.stdout,
+            stderr=completed.stderr,
+        )
 
 
 @dataclass(frozen=True)
@@ -160,6 +234,114 @@ class FakeLocalAdapter:
             cost=cost,
             outcome=outcome,
             patch="",
+        )
+
+
+@dataclass(frozen=True)
+class CodexCliAdapter:
+    provider_id: str = "codex"
+    command: str = "codex"
+    extra_args: tuple[str, ...] = ()
+    cwd: str | Path | None = None
+    env: Mapping[str, str] | None = None
+    timeout: float | None = 300.0
+    process_runner: ProcessRunner = SubprocessRunner()
+    model_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider_id", _normalize_non_empty_string(self.provider_id, "provider_id"))
+        object.__setattr__(self, "command", _normalize_non_empty_string(self.command, "command"))
+        object.__setattr__(self, "extra_args", _normalize_string_sequence(self.extra_args, "extra_args"))
+        if self.cwd is not None and not isinstance(self.cwd, (str, Path)):
+            raise AdapterError("cwd must be a string, Path, or None.")
+        if self.env is not None:
+            object.__setattr__(self, "env", _normalize_env(self.env))
+        if self.timeout is not None:
+            object.__setattr__(self, "timeout", _normalize_optional_timeout(self.timeout))
+        if self.model_id is not None:
+            object.__setattr__(self, "model_id", _normalize_non_empty_string(self.model_id, "model_id"))
+        if not hasattr(self.process_runner, "run") or not callable(self.process_runner.run):
+            raise AdapterError("process_runner must provide run().")
+
+    def execute(self, request: AdapterRequest) -> AdapterResult:
+        run = request.run
+        model_tier = _selected_model_tier(run, request.route)
+        model_id = _selected_model_id(self.model_id or "codex-cli", request.route)
+        argv = self.build_argv(run)
+        process_result = self.process_runner.run(
+            argv,
+            cwd=self.cwd,
+            env=self.env,
+            timeout=self.timeout,
+        )
+        if not isinstance(process_result, ProcessResult):
+            raise AdapterError("process_runner.run must return a ProcessResult.")
+
+        status = "success" if process_result.exit_code == 0 else "failure"
+        transcript_events = (
+            {
+                "sequence": 1,
+                "event": "execution_started",
+                "provider_id": self.provider_id,
+                "model_id": model_id,
+                "model_tier": model_tier,
+                "mode": run.mode,
+                "argv": list(argv),
+                "cwd": None if self.cwd is None else str(self.cwd),
+                "timeout_seconds": self.timeout,
+            },
+            {
+                "sequence": 2,
+                "event": "process_output_captured",
+                "stdout": process_result.stdout,
+                "stderr": process_result.stderr,
+            },
+            {
+                "sequence": 3,
+                "event": "execution_completed",
+                "status": status,
+                "exit_code": process_result.exit_code,
+            },
+        )
+        cost = {
+            "currency": "USD",
+            "estimated": False,
+            "known": False,
+            "input_tokens": 0,
+            "output_tokens": 0,
+            "total_cost_usd": 0.0,
+        }
+        outcome = {
+            "status": status,
+            "outcome": "codex_cli_completed" if status == "success" else "codex_cli_failed",
+            "summary": _codex_outcome_summary(process_result),
+            "exit_code": process_result.exit_code,
+            "patch_applied": False,
+        }
+        return AdapterResult(
+            provider_id=self.provider_id,
+            model_id=model_id,
+            model_tier=model_tier,
+            status=status,
+            transcript_events=transcript_events,
+            cost=cost,
+            outcome=outcome,
+            patch="",
+        )
+
+    def build_argv(self, run: AgentRun) -> tuple[str, ...]:
+        if not isinstance(run, AgentRun):
+            raise AdapterError("run must be an AgentRun.")
+        prompt = _build_codex_plan_prompt(run)
+        return (
+            self.command,
+            "exec",
+            "--sandbox",
+            "read-only",
+            "--ask-for-approval",
+            "never",
+            *self.extra_args,
+            prompt,
         )
 
 
@@ -315,13 +497,89 @@ def _normalize_non_empty_string(value: object, field_name: str) -> str:
     return normalized
 
 
+def _normalize_string_sequence(value: object, field_name: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence):
+        raise AdapterError(f"{field_name} must be a sequence of strings.")
+    normalized: list[str] = []
+    for item in value:
+        normalized.append(_normalize_non_empty_string(item, f"{field_name} entry"))
+    return tuple(normalized)
+
+
+def _normalize_env(value: Mapping[str, str]) -> Mapping[str, str]:
+    if not isinstance(value, Mapping):
+        raise AdapterError("env must be a mapping.")
+    normalized: dict[str, str] = {}
+    for key, item in value.items():
+        normalized[_normalize_non_empty_string(key, "env key")] = _normalize_env_value(item)
+    return normalized
+
+
+def _normalize_env_value(value: object) -> str:
+    if not isinstance(value, str):
+        raise AdapterError("env values must be strings.")
+    return value
+
+
+def _normalize_optional_timeout(value: object) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise AdapterError("timeout must be a number or None.")
+    timeout = float(value)
+    if timeout <= 0:
+        raise AdapterError("timeout must be greater than zero.")
+    return timeout
+
+
+def _build_codex_plan_prompt(run: AgentRun) -> str:
+    lines = [
+        "You are running behind AgentX as a provider adapter.",
+        "Return a concise implementation plan or review summary only.",
+        "Do not edit files, run mutating commands, apply patches, or modify the workspace.",
+        "",
+        f"Mode: {run.mode}",
+        f"Requested provider: {run.provider}",
+        f"Requested model tier: {run.model_tier or 'auto'}",
+    ]
+    if run.context_paths:
+        lines.append("Context paths:")
+        lines.extend(f"- {path}" for path in run.context_paths)
+    if run.task_hints:
+        lines.append("Task hints:")
+        lines.extend(f"- {hint}" for hint in run.task_hints)
+    if run.required_tools:
+        lines.append("Required tools:")
+        lines.extend(f"- {tool}" for tool in run.required_tools)
+    lines.extend(("", "User prompt:", run.prompt))
+    return "\n".join(lines)
+
+
+def _codex_outcome_summary(process_result: ProcessResult) -> str:
+    if process_result.exit_code == 0:
+        return "Codex CLI completed successfully without applying patches through AgentX."
+    return f"Codex CLI exited with code {process_result.exit_code}."
+
+
+def _timeout_output_to_string(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
+
+
 __all__ = [
     "AdapterError",
     "AdapterRequest",
     "AdapterResult",
+    "CodexCliAdapter",
     "FakeLocalAdapter",
+    "ProcessResult",
+    "ProcessRunner",
     "ProviderAdapter",
     "StoredAdapterRun",
+    "SubprocessRunner",
     "execute_adapter_run",
     "execute_fake_run",
 ]
