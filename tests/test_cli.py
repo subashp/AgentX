@@ -28,7 +28,32 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, code)
         payload = json.loads(stdout.getvalue())
         self.assertEqual("fix tests", payload["run"]["prompt"])
+        self.assertEqual({"max_cost_usd": None, "max_input_tokens": None, "max_output_tokens": None}, payload["run"]["budget"])
         self.assertEqual("no_eligible_provider", payload["reason"])
+
+    def test_route_rejects_invalid_mode(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with mock.patch("agentx.cli.ProviderRegistry") as registry:
+            registry.return_value.list_statuses.return_value = ()
+            code = cli.run(["route", "--mode", "ship", "fix tests"], stdout, stderr)
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("invalid mode 'ship'", stderr.getvalue())
+
+    def test_route_rejects_missing_prompt(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with mock.patch("agentx.cli.ProviderRegistry") as registry:
+            registry.return_value.list_statuses.return_value = ()
+            code = cli.run(["route", "--mode", "plan"], stdout, stderr)
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("prompt is required", stderr.getvalue())
 
     def test_providers_list_text_output(self):
         stdout = io.StringIO()

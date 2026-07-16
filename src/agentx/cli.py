@@ -7,7 +7,7 @@ from typing import Sequence, TextIO
 
 from .config import ConfigError, load_settings
 from .providers import ProviderRegistry
-from .routing import AgentRun, Router
+from .routing import AgentRun, RouteValidationError, Router
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -32,7 +32,11 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub.add_parser("show", help="show resolved settings")
     config_sub.add_parser("path", help="show resolved AgentX state paths")
 
-    parser.add_argument("prompt", nargs="?", help="prompt shorthand for a plan-mode route explanation")
+    parser.add_argument(
+        "prompt_shorthand",
+        nargs="?",
+        help="prompt shorthand for a plan-mode route explanation",
+    )
     return parser
 
 
@@ -49,7 +53,7 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
         except ConfigError as exc:
             stderr.write(f"agentx: {exc}\n")
             return 2
-        return _route(prompt, "plan", "auto", None, settings, json_output, stdout)
+        return _route(prompt, "plan", "auto", None, settings, json_output, stdout, stderr)
 
     parser = build_parser()
     args = parser.parse_args(list(argv))
@@ -60,8 +64,17 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
         stderr.write(f"agentx: {exc}\n")
         return 2
 
-    if args.command is None and args.prompt:
-        return _route(args.prompt, "plan", "auto", None, settings, args.json, stdout)
+    if args.command is None and args.prompt_shorthand:
+        return _route(
+            args.prompt_shorthand,
+            "plan",
+            "auto",
+            None,
+            settings,
+            args.json,
+            stdout,
+            stderr,
+        )
 
     if args.command == "providers" and args.providers_command == "list":
         statuses = ProviderRegistry(settings=settings).list_statuses()
@@ -73,7 +86,16 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
         )
 
     if args.command == "route":
-        return _route(args.prompt, args.mode, args.provider, args.model_tier, settings, args.json, stdout)
+        return _route(
+            args.prompt,
+            args.mode,
+            args.provider,
+            args.model_tier,
+            settings,
+            args.json,
+            stdout,
+            stderr,
+        )
 
     if args.command == "config" and args.config_command == "show":
         return _write(settings.as_dict(), args.json, stdout)
@@ -109,11 +131,16 @@ def _route(
     settings,
     json_output: bool,
     stdout: TextIO,
+    stderr: TextIO,
 ) -> int:
     statuses = ProviderRegistry(settings=settings).list_statuses()
-    decision = Router(settings, statuses).explain(
-        AgentRun(prompt=prompt, mode=mode, provider=provider, model_tier=model_tier)
-    )
+    try:
+        decision = Router(settings, statuses).explain(
+            AgentRun(prompt=prompt, mode=mode, provider=provider, model_tier=model_tier)
+        )
+    except RouteValidationError as exc:
+        stderr.write(f"agentx: {exc}\n")
+        return 2
     return _write(decision.as_dict(), json_output, stdout)
 
 
