@@ -64,7 +64,7 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
         return _route(args.prompt, "plan", "auto", None, settings, args.json, stdout)
 
     if args.command == "providers" and args.providers_command == "list":
-        statuses = ProviderRegistry().list_statuses()
+        statuses = ProviderRegistry(settings=settings).list_statuses()
         return _write(
             [status.as_dict() for status in statuses],
             args.json,
@@ -110,7 +110,7 @@ def _route(
     json_output: bool,
     stdout: TextIO,
 ) -> int:
-    statuses = ProviderRegistry().list_statuses()
+    statuses = ProviderRegistry(settings=settings).list_statuses()
     decision = Router(settings, statuses).explain(
         AgentRun(prompt=prompt, mode=mode, provider=provider, model_tier=model_tier)
     )

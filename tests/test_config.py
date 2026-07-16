@@ -45,6 +45,17 @@ class SettingsLoaderTests(unittest.TestCase):
                 "public_providers": ["codex", "claude"],
                 "private_provider": "private-local",
                 "external_max_classification": "public",
+                "providers": {
+                    "codex": {
+                        "command": "/tools/codex",
+                        "auth_check": "codex-auth",
+                        "subscription_check": "codex-subscription",
+                    },
+                    "private-openai-compatible": {
+                        "endpoint": "http://127.0.0.1:8000/v1",
+                        "enabled": False,
+                    },
+                },
             }
         )
 
@@ -57,6 +68,9 @@ class SettingsLoaderTests(unittest.TestCase):
         self.assertEqual(("codex", "claude"), settings.public_providers)
         self.assertEqual("private-local", settings.private_provider)
         self.assertEqual("public", settings.external_max_classification)
+        self.assertEqual("/tools/codex", settings.providers["codex"].command)
+        self.assertEqual("codex-auth", settings.providers["codex"].auth_check)
+        self.assertFalse(settings.providers["private-openai-compatible"].enabled)
 
     def test_invalid_settings_shape_is_rejected(self):
         paths = PathResolver({"AGENTX_HOME": "/state"}).resolve()
@@ -92,6 +106,17 @@ external_max_classification: public
         self.assertEqual(("codex", "claude"), settings.public_providers)
         self.assertEqual("private-local", settings.private_provider)
         self.assertEqual("public", settings.external_max_classification)
+
+    def test_invalid_provider_settings_are_rejected(self):
+        paths = PathResolver({"AGENTX_HOME": "/state"}).resolve()
+        raw = json.dumps({"providers": {"codex": {"enabled": "yes"}}})
+
+        with (
+            mock.patch.object(Path, "exists", return_value=True),
+            mock.patch.object(Path, "read_text", return_value=raw),
+            self.assertRaises(ConfigError),
+        ):
+            SettingsLoader(paths).load()
 
 if __name__ == "__main__":
     unittest.main()

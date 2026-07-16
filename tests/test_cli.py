@@ -39,6 +39,21 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertIn("codex", stdout.getvalue())
 
+    def test_providers_list_uses_loaded_settings(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        with mock.patch("agentx.cli.load_settings") as load_settings:
+            settings = mock.Mock()
+            settings.providers = {}
+            load_settings.return_value = settings
+            code = cli.run(["--json", "providers", "list"], stdout, stderr)
+
+        self.assertEqual(0, code)
+        load_settings.assert_called_once()
+        payload = json.loads(stdout.getvalue())
+        self.assertTrue(any(provider["id"] == "codex" for provider in payload))
+
 
 if __name__ == "__main__":
     unittest.main()

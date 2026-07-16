@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Mapping
 
@@ -35,6 +35,7 @@ class Settings:
     public_providers: tuple[str, ...] = ()
     private_provider: str | None = None
     external_max_classification: str = "internal"
+    providers: dict[str, "ProviderSettings"] = field(default_factory=dict)
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -42,6 +43,28 @@ class Settings:
             "public_providers": list(self.public_providers),
             "private_provider": self.private_provider,
             "external_max_classification": self.external_max_classification,
+            "providers": {
+                provider_id: provider.as_dict()
+                for provider_id, provider in sorted(self.providers.items())
+            },
+        }
+
+
+@dataclass(frozen=True)
+class ProviderSettings:
+    command: str | None = None
+    endpoint: str | None = None
+    enabled: bool = True
+    auth_check: str | None = None
+    subscription_check: str | None = None
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "command": self.command,
+            "endpoint": self.endpoint,
+            "enabled": self.enabled,
+            "auth_check": self.auth_check,
+            "subscription_check": self.subscription_check,
         }
 
 
@@ -105,6 +128,7 @@ class SettingsLoader:
                 raw.get("external_max_classification", "internal"),
                 "external_max_classification",
             ),
+            providers=_provider_settings(raw.get("providers", {})),
         )
 
 
@@ -197,4 +221,46 @@ def _parse_yaml_scalar(value: str) -> object:
 def _required_string(value: object, field_name: str) -> str:
     if not isinstance(value, str):
         raise ConfigError(f"{field_name} must be a string.")
+    return value
+
+
+def _provider_settings(value: object) -> dict[str, ProviderSettings]:
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        raise ConfigError("providers must be an object keyed by provider id.")
+
+    providers: dict[str, ProviderSettings] = {}
+    for provider_id, raw_provider in value.items():
+        if not isinstance(provider_id, str):
+            raise ConfigError("provider ids must be strings.")
+        if not isinstance(raw_provider, dict):
+            raise ConfigError(f"provider '{provider_id}' settings must be an object.")
+        providers[provider_id] = ProviderSettings(
+            command=_optional_string_field(raw_provider.get("command"), f"providers.{provider_id}.command"),
+            endpoint=_optional_string_field(raw_provider.get("endpoint"), f"providers.{provider_id}.endpoint"),
+            enabled=_optional_bool_field(raw_provider.get("enabled", True), f"providers.{provider_id}.enabled"),
+            auth_check=_optional_string_field(
+                raw_provider.get("auth_check"),
+                f"providers.{provider_id}.auth_check",
+            ),
+            subscription_check=_optional_string_field(
+                raw_provider.get("subscription_check"),
+                f"providers.{provider_id}.subscription_check",
+            ),
+        )
+    return providers
+
+
+def _optional_string_field(value: object, field_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ConfigError(f"{field_name} must be a string.")
+    return value
+
+
+def _optional_bool_field(value: object, field_name: str) -> bool:
+    if not isinstance(value, bool):
+        raise ConfigError(f"{field_name} must be a boolean.")
     return value
