@@ -1,186 +1,185 @@
 # AgentX
 
-AgentX is a provider-neutral command-line gateway for agentic coding. It routes development tasks to the best available coding agent or private model while enforcing local policy for data access, tool use, and cost.
+AgentX is a provider-neutral, privacy-first command-line gateway for agentic
+coding workflows. It routes coding tasks through local policy boundaries before
+any provider receives context, and it records deterministic local artifacts for
+auditing.
 
-The project is designed for developers who use multiple coding assistants and want one consistent CLI for planning, implementation, review, and automation.
+The current implementation is a standard-library Python package for Python 3.11
+and newer. It has no runtime package dependencies today.
 
-The core is intended to be platform-neutral. Platform-specific paths, process launching, credential storage, and filesystem behavior should stay behind implementation abstractions so the project can be ported by developers to the environments they need.
+AgentX is built so provider choice stays policy-driven rather than hard-coded to
+one commercial backend. Public CLIs, private model endpoints, and future compute
+backends are modeled as adapters behind the same routing and artifact contracts.
 
-## Goals
+## Quickstart
 
-- Provide a single CLI for interactive and scripted agentic coding workflows.
-- Route tasks across providers such as Codex, Claude Code, Kiro CLI, and OpenAI-compatible private model endpoints.
-- Select both the provider and the model tier based on task complexity, required capability, latency, and cost.
-- Keep provider selection policy-driven instead of hard-coded to one vendor.
-- Enforce file-level data handling rules before any provider sees repository context.
-- Support local or privately hosted models for sensitive code and confidential workloads.
-- Preserve auditable local session context, transcripts, manifests, generated diffs, and user-controlled memories.
-- Keep one reusable core that can be driven from command-line automation, an interactive CLI, or a future UI.
+From a source checkout, make `src` importable first. You can do that with an
+editable install, or by setting `PYTHONPATH` to `src` in your shell. The examples
+below assume `src` is already importable.
 
-## Example UX
+```sh
+python -m agentx providers list
+python -m agentx route "summarize the routing module"
+python -m agentx plan --fake --context README.md "plan a documentation cleanup"
+python -m agentx execute --fake --allowed-patch README.md "try an offline execute run"
+python -m agentx config path
+python -m agentx config show
+```
 
-```text
-agentx
-agentx "fix the failing tests"
-agentx -p "summarize this module"
-agentx plan "refactor the scheduler"
-agentx run "implement auth refresh" --mode execute
-agentx run "review this PR" --provider codex
+Use `--json` before the command for machine-readable output:
+
+```sh
+python -m agentx --json route "summarize the routing module"
+python -m agentx --json config path
+```
+
+The installed console script exposes the same commands as `agentx` when the
+package is installed in an environment:
+
+```sh
 agentx providers list
-agentx policy explain src/core/planner.py
-agentx context save --name auth-refactor
-agentx context use <session-id>
-agentx memory list
-agentx memory edit <memory-id>
-agentx memory delete <memory-id>
+agentx plan --fake "plan with the deterministic local adapter"
 ```
 
-## Architecture
+## Current CLI
 
-```text
-Command Line / Interactive CLI / Future UI
-    |
-    v
-Command Parser
-    |
-    v
-Agent Run Envelope
-    |
-    v
-Policy + Context Compiler
-    |
-    +--> File Classification
-    +--> Context Slicing
-    +--> Session + Memory Selection
-    +--> MCP Tool Policy
-    +--> Cost / Subscription Constraints
-    +--> Task Complexity Estimate
-    |
-    v
-Provider + Model Router
-    |
-    +--> Codex CLI Adapter
-    +--> Claude Code Adapter
-    +--> Kiro CLI Adapter
-    +--> OpenAI-Compatible Private Model Adapter
-    +--> Private Cloud Container Adapter
-    |
-    v
-Scoped Workspace / Sandbox / MCP Proxy
-    |
-    v
-Session Context + Memory Store + Run Artifacts
-```
+The public CLI currently supports:
+
+- `providers list`: inspect configured provider availability.
+- `route`: explain provider and model-tier routing without running a provider.
+- `plan --fake`: run the deterministic offline plan workflow and write local
+  artifacts.
+- `execute --fake`: run the deterministic offline execute workflow, validate any
+  adapter patch output, and write local artifacts without applying source
+  mutations.
+- `run --fake`: run the lower-level deterministic fake adapter path.
+- `config path`: show the resolved AgentX state paths.
+- `config show`: show resolved settings.
+
+Live provider execution is intentionally not exposed through `plan` or
+`execute` yet. Current live-provider and cloud-provider work is represented by
+adapter contracts and source-level wiring points, including CLI process adapters
+and a private OpenAI-compatible chat-completions adapter. Those integrations are
+optional wiring points until they are exposed by the public CLI.
 
 ## Privacy Model
 
-AgentX treats external coding assistants as execution backends, not as the authority for privacy. The gateway decides what each backend can see.
+AgentX treats providers as execution backends, not as the authority for privacy.
+AgentX decides what a provider can see before a request crosses the adapter
+boundary.
 
-Repository context is organized into tiers:
+Implemented privacy controls include:
 
-```text
-Tier 0: task prompt and user instructions
-Tier 1: public repository summary
-Tier 2: non-sensitive relevant files
-Tier 3: confidential or proprietary files
-Tier 4: secrets, credentials, customer data
-```
-
-External providers should only receive context permitted by policy. Private hosted models can be configured for higher-classification context when the user wants local or private-cloud processing.
-
-The policy and context compiler also controls memory exposure. Memories can be selected, summarized, excluded, or redacted before a public provider such as OpenAI, Anthropic, or another external service receives context. Editing or deleting saved memories is a local metadata operation and does not require a model call.
-
-## Provider Types
-
-AgentX is intended to support two provider categories:
-
-- **Agent providers:** coding assistants or model endpoints that perform planning, editing, review, or explanation.
-- **Compute providers:** local or cloud infrastructure capable of running a private model container on demand.
-
-Example agent providers:
-
-- Codex CLI
-- Claude Code
-- Kiro CLI
-- Local OpenAI-compatible model server
-- Private cloud-hosted OpenAI-compatible model server
-
-Users may default to one or more public providers, or run without any self-hosted model. When no private model is configured, policy should prevent confidential workloads from being routed rather than silently relaxing privacy constraints.
-
-Providers can expose multiple models with different cost, speed, context, and capability profiles. AgentX should maintain a model catalog and route at the model level, not only the provider level. For example, planning a risky architecture change may require a high-capability model, while test generation, documentation updates, summarization, or bounded execution can use a lower-cost model when policy and quality requirements allow it.
+- Policy classification for repository paths using `public`, `internal`,
+  `confidential`, `proprietary`, and `secret` levels.
+- Provider eligibility filtering based on classification, public-provider
+  defaults, private-provider settings, and explicit routing rules.
+- Context manifest compilation for external and private provider classes.
+- Path redaction and summary placeholders for withheld context.
+- Memory exposure decisions that can include, summarize, redact, or exclude
+  memories before provider visibility.
+- A private OpenAI-compatible adapter that uses Python standard-library HTTP
+  primitives and rejects base URLs containing credentials.
+- MCP per-run config generation with service visibility, tool allowlists and
+  denylists, auth path references, sanitized endpoints, and argument/result
+  redaction primitives.
+- Scoped workspace path normalization that rejects absolute paths, traversal,
+  duplicate aliases, and case-ambiguous aliases.
+- Execute-mode patch validation for allowed paths, denied paths, invalid patch
+  paths, and configured secret markers.
+- A fake offline flow for routine validation without live model calls, provider
+  subscriptions, cloud compute, or network access.
 
 ## Local State
 
-AgentX keeps local state outside the project by default, with user-configurable overrides:
+AgentX keeps local state under an AgentX state root. The exact default location
+is platform-specific and intentionally treated as an implementation detail. Use
+`agentx config path` or `python -m agentx config path` to inspect the resolved
+paths for the current environment.
+
+The state root is organized generically as:
 
 ```text
-<AGENTX_HOME>/settings.json       # or settings.yaml
-<AGENTX_HOME>/sessions/           # per-session saved context
-<AGENTX_HOME>/memories/           # user-editable memory files
-<AGENTX_HOME>/auth/               # service-scoped authentication material
+<AgentX state root>/
+  settings.json
+  sessions/
+  memories/
+  auth/
 ```
 
-`AGENTX_HOME` resolves to a user-local application data directory by default. The exact platform path is an implementation detail, and users can override it globally or per run. The settings file records local paths, provider defaults, session-store location, memory-store location, policy preferences, and auth-store location.
+Environment overrides can redirect the state root or individual state areas:
 
-MCP services may require authentication. AgentX should store MCP and provider authentication material under service-specific entries in the configured auth directory, using secure local storage where available.
+- `AGENTX_HOME`: AgentX state root.
+- `AGENTX_SETTINGS`: settings document path.
+- `AGENTX_SESSIONS`: run/session artifact directory.
+- `AGENTX_MEMORIES`: local memory record directory.
+- `AGENTX_AUTH`: service-scoped authentication material directory.
 
-## Policy
+Run artifacts are local by default and should not be committed unless
+intentionally exported. Fake plan and execute runs write artifacts such as
+`manifest.json`, `prompt.md`, `context-map.json`, `memory-map.json`,
+`redactions.json`, `provider.json`, `transcript.jsonl`, `patch.diff`,
+`cost.json`, and `outcome.json` under a session directory.
 
-Project policy should be explicit and versionable. A future `.agentx/policy.toml` may define classification and routing rules:
+## Provider Model
 
-```toml
-[defaults]
-external_max_classification = "internal"
-private_provider = "private-local"
-public_providers = ["codex", "claude"]
+AgentX currently models these provider categories:
 
-[model_tiers]
-planning = "high"
-execution = "standard"
-tests = "economy"
-docs = "economy"
-review = "standard"
+- CLI adapters for coding assistants exposed as local commands.
+- Local or private-cloud OpenAI-compatible model endpoints.
+- Deterministic fake local adapters for offline tests and examples.
 
-[classification]
-"docs/public/**" = "public"
-"tests/**" = "internal"
-"src/sensitive/**" = "confidential"
+The default provider registry can report availability for Codex CLI, Claude
+Code, Kiro CLI, and a private OpenAI-compatible endpoint. Provider status is
+based on configured settings, command discovery, endpoint configuration, and
+optional auth or subscription checks.
 
-[routing]
-confidential = ["private-local", "private-cloud"]
-internal = ["codex", "claude", "kiro", "private-local"]
-public = ["codex", "claude", "kiro", "private-local"]
+Cloud compute providers and live private model lifecycle management are future
+or optional wiring. Public documentation should describe them as adapter
+contracts until user-facing commands exist.
+
+## Configuration
+
+Settings may be JSON, or simple YAML for supported scalar and list fields. The
+resolved settings include:
+
+```json
+{
+  "public_providers": ["codex", "claude"],
+  "private_provider": "private-openai-compatible",
+  "external_max_classification": "internal",
+  "providers": {
+    "private-openai-compatible": {
+      "endpoint": "https://example.invalid",
+      "enabled": true
+    }
+  }
+}
 ```
 
-The router should first filter by privacy and availability, then choose the lowest-cost model that satisfies the task's required capability, context size, tool needs, and confidence threshold.
+Provider IDs are configuration data. Do not assume one public provider is the
+only viable execution path.
 
-## Run Artifacts
+## Development
 
-Each run should produce local artifacts for auditing and reproducibility. By default, run context is saved under the configured session directory:
+Run tests from a checkout with `src` importable:
 
-```text
-<AGENTX_HOME>/sessions/<session-id>/
-  manifest.json
-  prompt.md
-  context-map.json
-  memory-map.json
-  redactions.json
-  provider.json
-  transcript.jsonl
-  patch.diff
-  cost.json
-  outcome.json
+```sh
+python -m unittest discover -s tests
 ```
 
-Run artifacts are local by default and should not be committed unless intentionally exported.
+Routine tests use deterministic fixtures and fakes. They should not require live
+provider credentials, subscriptions, cloud infrastructure, or network access.
 
-## Status
+## Public Release Checklist
 
-This repository is in the planning stage. The initial implementation target is a minimal CLI that can:
+Before a public release or README-facing example update:
 
-- Detect available providers.
-- Load provider model catalogs and explain model-tier choices.
-- Explain routing decisions.
-- Compile a scoped context manifest.
-- Run a plan-only task through one provider.
-- Save local run artifacts.
+- Confirm README commands match the current CLI parser.
+- Verify fake plan and execute examples run offline.
+- Confirm public docs do not include private paths, credentials, local workflow
+  details, ignored directories, generated run logs, model weights, or datasets.
+- Describe live provider and cloud behavior only where it is exposed through the
+  public CLI; otherwise call it an adapter contract or optional future wiring.
+- Run the focused tests or full test suite and record the command used.
