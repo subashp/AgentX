@@ -7,6 +7,7 @@ from typing import Sequence, TextIO
 
 from .adapters import AdapterError, execute_fake_run
 from .config import ConfigError, load_settings
+from .orchestrator import OrchestratorError, execute_plan_mode
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
 from .store import SessionStore, StoreError
@@ -35,6 +36,13 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--mode", default="plan", help="task mode")
     run.add_argument("--model-tier", default=None, help="model tier override")
     run.add_argument("prompt", nargs="?", default="", help="task prompt")
+
+    plan = subparsers.add_parser("plan", help="run a read-only plan workflow")
+    plan.add_argument("--fake", action="store_true", help="use the deterministic local fake adapter")
+    plan.add_argument("--session-id", default="local-plan", help="local session/run id")
+    plan.add_argument("--model-tier", default=None, help="model tier override")
+    plan.add_argument("--context", action="append", default=None, help="context path to include")
+    plan.add_argument("prompt", nargs="?", default="", help="task prompt")
 
     config = subparsers.add_parser("config", help="inspect configuration")
     config_sub = config.add_subparsers(dest="config_command")
@@ -121,6 +129,21 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
             stderr,
         )
 
+    if args.command == "plan":
+        if not args.fake:
+            stderr.write("agentx: plan currently supports only --fake local execution.\n")
+            return 2
+        return _plan(
+            args.prompt,
+            args.model_tier,
+            args.session_id,
+            tuple(args.context or ()),
+            settings,
+            args.json,
+            stdout,
+            stderr,
+        )
+
     if args.command == "config" and args.config_command == "show":
         return _write(settings.as_dict(), args.json, stdout)
 
@@ -138,7 +161,7 @@ def _prompt_shorthand(argv: Sequence[str]) -> tuple[bool, str] | None:
         json_output = True
         tokens = tokens[1:]
 
-    if not tokens or tokens[0] in {"providers", "route", "run", "config", "-h", "--help"}:
+    if not tokens or tokens[0] in {"providers", "route", "run", "plan", "config", "-h", "--help"}:
         return None
 
     if tokens[0].startswith("-"):
@@ -202,6 +225,48 @@ def _fake_run(
     )
 
 
+def _plan(
+    prompt: str,
+    model_tier: str | None,
+    session_id: str,
+    context_paths: tuple[str, ...],
+    settings,
+    json_output: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    try:
+        run = AgentRun(
+            prompt=prompt,
+            mode="plan",
+            provider="auto",
+            model_tier=model_tier,
+            context_paths=context_paths,
+        )
+        result = execute_plan_mode(
+            settings=settings,
+            session_store=SessionStore(settings.paths),
+            session_id=session_id,
+            run=run,
+        )
+    except (
+        AdapterError,
+        OrchestratorError,
+        RouteValidationError,
+        StoreError,
+        OSError,
+    ) as exc:
+        stderr.write(f"agentx: {exc}\n")
+        return 2
+
+    return _write(
+        result.as_dict(),
+        json_output,
+        stdout,
+        text_formatter=_format_plan,
+    )
+
+
 def _write(value, json_output: bool, stdout: TextIO, text_formatter=None) -> int:
     if json_output:
         stdout.write(json.dumps(value, indent=2, sort_keys=True))
@@ -227,3 +292,11 @@ def _format_providers(statuses: list[dict[str, object]]) -> str:
 
 def _format_fake_run(payload: dict[str, object]) -> str:
     return f"wrote fake run artifacts to {payload['root']}\n"
+
+
+def _format_plan(payload: dict[str, object]) -> str:
+    route = payload["route"]
+    return (
+        f"wrote plan artifacts to {payload['root']}\n"
+        f"{route['explanation']}\n"
+    )
