@@ -196,6 +196,73 @@ class CliTests(unittest.TestCase):
         self.assertEqual("", stdout.getvalue())
         self.assertIn("plan currently supports only --fake", stderr.getvalue())
 
+    def test_execute_outputs_json_and_writes_validation_artifacts_without_provider_registry(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_execute"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                ),
+                public_providers=("fake-local",),
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                    registry.side_effect = AssertionError("provider registry was used")
+                    code = cli.run(
+                        [
+                            "--json",
+                            "execute",
+                            "--fake",
+                            "--session-id",
+                            "cli-execute",
+                            "--allowed-patch",
+                            "src/app.py",
+                            "local execute",
+                        ],
+                        stdout,
+                        stderr,
+                    )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual("cli-execute", payload["session_id"])
+            self.assertEqual("execute", payload["run"]["mode"])
+            self.assertEqual("success", payload["result"]["status"])
+            self.assertTrue(payload["patch_validation"]["accepted"])
+            self.assertFalse(payload["patch_applied"])
+            self.assertTrue((root / "sessions" / "cli-execute" / "outcome.json").exists())
+            outcome = json.loads(
+                (root / "sessions" / "cli-execute" / "outcome.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertTrue(outcome["patch_validation"]["accepted"])
+            self.assertFalse(outcome["patch_application"]["supported"])
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
+    def test_execute_requires_fake_until_live_execution_is_supported(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+
+        code = cli.run(["execute", "local execute"], stdout, stderr)
+
+        self.assertEqual(2, code)
+        self.assertEqual("", stdout.getvalue())
+        self.assertIn("execute currently supports only --fake", stderr.getvalue())
+
     def test_run_fake_reports_storage_failure_without_traceback(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

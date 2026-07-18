@@ -23,6 +23,7 @@ from .policy import Policy
 from .providers import ProviderStatus
 from .routing import AgentRun, RouteDecision, Router
 from .store import SessionStore
+from .workspace import PatchValidationResult, SecretScanner, validate_patch_paths
 
 
 class OrchestratorError(ValueError):
@@ -49,6 +50,34 @@ class PlanModeResult:
             "route": self.route.as_dict(),
             "provider_class": self.provider_class,
             "context_manifest": self.context_manifest.as_dict(),
+            "result": self.stored_run.result.as_dict(),
+        }
+
+
+@dataclass(frozen=True)
+class ExecuteModeResult:
+    run: AgentRun
+    route: RouteDecision
+    provider_class: str
+    context_manifest: ContextManifest
+    patch_validation: PatchValidationResult
+    stored_run: StoredAdapterRun
+
+    def as_dict(self) -> dict[str, object]:
+        return {
+            "session_id": self.stored_run.session_id,
+            "root": str(self.stored_run.root),
+            "artifacts": {
+                name: str(path)
+                for name, path in sorted(self.stored_run.artifact_paths.items())
+            },
+            "run": self.run.as_dict(),
+            "route": self.route.as_dict(),
+            "provider_class": self.provider_class,
+            "context_manifest": self.context_manifest.as_dict(),
+            "patch_validation": self.patch_validation.as_dict(),
+            "patch_accepted": self.patch_validation.accepted,
+            "patch_applied": False,
             "result": self.stored_run.result.as_dict(),
         }
 
@@ -128,6 +157,90 @@ def execute_plan_mode(
     )
 
 
+def execute_execute_mode(
+    *,
+    settings: Settings,
+    session_store: SessionStore,
+    session_id: str,
+    allowed_patch_paths: Sequence[str],
+    denied_patch_paths: Sequence[str] = (),
+    prompt: str | None = None,
+    run: AgentRun | None = None,
+    provider_statuses: Sequence[ProviderStatus] | None = None,
+    router: Router | None = None,
+    model_catalog: ModelCatalog | None = None,
+    policy: Policy | None = None,
+    memories: Sequence[MemoryRecord] = (),
+    context_paths: Sequence[str] | None = None,
+    inferred_context_paths: Sequence[str] = (),
+    adapter: ProviderAdapter | None = None,
+    secret_scanner: SecretScanner | None = None,
+) -> ExecuteModeResult:
+    """Run controlled execute mode and persist audit artifacts.
+
+    AX-014 validates provider patch output and records accepted patches, but it
+    never applies patches to source files.
+    """
+
+    if not isinstance(settings, Settings):
+        raise OrchestratorError("settings must be a Settings object.")
+    if not isinstance(session_store, SessionStore):
+        raise OrchestratorError("session_store must be a SessionStore.")
+
+    execute_run = _build_execute_run(prompt=prompt, run=run, context_paths=context_paths)
+    statuses = _normalize_provider_statuses(provider_statuses)
+    active_policy = policy or _default_policy(settings)
+    active_router = router or Router(
+        settings=settings,
+        providers=statuses,
+        model_catalog=model_catalog,
+        policy=active_policy,
+    )
+    route = active_router.explain(execute_run)
+    provider_class = _provider_class_for_route(
+        route,
+        statuses=statuses,
+        settings=settings,
+        policy=active_policy,
+        run=execute_run,
+    )
+    context_manifest = _compile_manifest(
+        policy=active_policy,
+        provider_class=provider_class,
+        requested_paths=execute_run.context_paths,
+        inferred_paths=inferred_context_paths,
+        memories=memories,
+    )
+    context_map = _context_map_from_manifest(context_manifest, route)
+    memory_map = _memory_map_from_manifest(context_manifest)
+    redactions = [entry.as_dict() for entry in context_manifest.redactions]
+    validating_adapter = _PatchValidatingExecuteAdapter(
+        adapter=adapter or FakeLocalAdapter(),
+        allowed_patch_paths=allowed_patch_paths,
+        denied_patch_paths=denied_patch_paths,
+        secret_scanner=secret_scanner,
+    )
+
+    stored = execute_adapter_run(
+        session_store=session_store,
+        session_id=session_id,
+        run=execute_run,
+        adapter=validating_adapter,
+        route=route,
+        context_map=context_map,
+        memory_map=memory_map,
+        redactions=redactions,
+    )
+    return ExecuteModeResult(
+        run=execute_run,
+        route=route,
+        provider_class=provider_class,
+        context_manifest=context_manifest,
+        patch_validation=validating_adapter.patch_validation,
+        stored_run=stored,
+    )
+
+
 @dataclass(frozen=True)
 class _ReadOnlyPlanAdapter:
     adapter: ProviderAdapter
@@ -146,6 +259,65 @@ class _ReadOnlyPlanAdapter:
         outcome["patch_suppressed"] = True
         outcome["patch_applied"] = False
         return replace(result, patch="", outcome=outcome)
+
+
+@dataclass
+class _PatchValidatingExecuteAdapter:
+    adapter: ProviderAdapter
+    allowed_patch_paths: Sequence[str]
+    denied_patch_paths: Sequence[str] = ()
+    secret_scanner: SecretScanner | None = None
+    patch_validation: PatchValidationResult | None = None
+
+    @property
+    def provider_id(self) -> str:
+        return self.adapter.provider_id
+
+    def execute(self, request: AdapterRequest) -> AdapterResult:
+        result = self.adapter.execute(request)
+        if not isinstance(result, AdapterResult):
+            raise OrchestratorError("adapter.execute must return an AdapterResult.")
+
+        validation = validate_patch_paths(
+            result.patch,
+            allowed_paths=self.allowed_patch_paths,
+            denied_paths=self.denied_patch_paths,
+            secret_scanner=self.secret_scanner,
+        )
+        self.patch_validation = validation
+
+        patch_has_content = result.patch.strip() != ""
+        accepted_patch = validation.accepted
+        stored_patch = result.patch if accepted_patch else ""
+        status = result.status if accepted_patch else "validation_failed"
+        outcome = dict(result.outcome)
+        outcome.update(
+            {
+                "status": status,
+                "outcome": (
+                    outcome.get("outcome", "execute_completed")
+                    if accepted_patch
+                    else "patch_validation_failed"
+                ),
+                "patch_accepted": accepted_patch,
+                "patch_applied": False,
+                "patch_application": {
+                    "applied": False,
+                    "supported": False,
+                    "reason": "AX-014 validates adapter patches and stores accepted patch artifacts, but does not apply source mutations.",
+                },
+                "patch_present": patch_has_content,
+                "patch_stored": bool(stored_patch),
+                "patch_validation": validation.as_dict(),
+            }
+        )
+
+        return replace(
+            result,
+            status=status,
+            patch=stored_patch,
+            outcome=outcome,
+        )
 
 
 def _build_plan_run(
@@ -168,6 +340,31 @@ def _build_plan_run(
     return AgentRun(
         prompt=prompt,
         mode="plan",
+        provider="auto",
+        context_paths=_normalize_context_paths(context_paths or ()),
+    )
+
+
+def _build_execute_run(
+    *,
+    prompt: str | None,
+    run: AgentRun | None,
+    context_paths: Sequence[str] | None,
+) -> AgentRun:
+    if run is not None:
+        if prompt is not None:
+            raise OrchestratorError("pass either run or prompt, not both.")
+        if run.mode != "execute":
+            raise OrchestratorError("execute mode requires run.mode to be 'execute'.")
+        if context_paths is None:
+            return run
+        return replace(run, context_paths=_normalize_context_paths(context_paths))
+
+    if prompt is None:
+        raise OrchestratorError("prompt is required when run is not supplied.")
+    return AgentRun(
+        prompt=prompt,
+        mode="execute",
         provider="auto",
         context_paths=_normalize_context_paths(context_paths or ()),
     )
@@ -305,7 +502,9 @@ def _memory_map_from_manifest(manifest: ContextManifest) -> dict[str, object]:
 
 
 __all__ = [
+    "ExecuteModeResult",
     "OrchestratorError",
     "PlanModeResult",
+    "execute_execute_mode",
     "execute_plan_mode",
 ]
