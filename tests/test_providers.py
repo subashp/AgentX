@@ -17,6 +17,18 @@ def settings(providers):
 
 
 class ProviderRegistryTests(unittest.TestCase):
+    def test_builtin_fake_local_provider_is_always_available(self):
+        registry = ProviderRegistry(
+            [ProviderDefinition("fake-local", "AgentX Fake Local", "builtin", None)]
+        )
+
+        statuses = registry.list_statuses()
+
+        self.assertTrue(statuses[0].enabled)
+        self.assertEqual("available", statuses[0].reason)
+        self.assertEqual("builtin", statuses[0].kind)
+        self.assertIsNone(statuses[0].command)
+
     def test_cli_provider_is_enabled_when_command_resolves(self):
         registry = ProviderRegistry(
             [ProviderDefinition("codex", "Codex", "cli", "codex")],

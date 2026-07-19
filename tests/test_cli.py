@@ -12,6 +12,112 @@ from agentx.providers import ProviderStatus
 
 
 class CliTests(unittest.TestCase):
+    def test_init_default_agentx_profile_writes_fake_local_settings(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_init_agentx"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                )
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                code = cli.run(["--json", "init"], stdout, stderr)
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual("agentx", payload["profile"])
+            written = json.loads((root / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(["fake-local"], written["public_providers"])
+            self.assertEqual({}, written["providers"])
+            self.assertNotIn("paths", written)
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
+    def test_init_refuses_to_overwrite_without_force(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_init_exists"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        (root / "settings.json").write_text('{"public_providers":["codex"]}\n', encoding="utf-8")
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                )
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                code = cli.run(["init"], stdout, stderr)
+
+            self.assertEqual(2, code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("settings already exist", stderr.getvalue())
+            self.assertEqual(
+                {"public_providers": ["codex"]},
+                json.loads((root / "settings.json").read_text(encoding="utf-8")),
+            )
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
+    def test_init_codex_profile_writes_configured_command(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_init_codex"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                )
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                code = cli.run(
+                    [
+                        "init",
+                        "--profile",
+                        "codex",
+                        "--codex-command",
+                        "codex-under-test",
+                    ],
+                    stdout,
+                    stderr,
+                )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            written = json.loads((root / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(["codex"], written["public_providers"])
+            self.assertEqual("codex-under-test", written["providers"]["codex"]["command"])
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
     def test_config_path_outputs_json(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -279,6 +385,50 @@ class CliTests(unittest.TestCase):
             payload = json.loads(stdout.getvalue())
             self.assertEqual("fake-local", payload["run"]["provider"])
             self.assertEqual("fake-local", payload["result"]["provider_id"])
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
+    def test_auto_plan_uses_fake_local_for_agentx_only_profile(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_plan_agentx_only"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                ),
+                public_providers=("fake-local",),
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                    registry.side_effect = AssertionError("provider registry was used")
+                    code = cli.run(
+                        [
+                            "--json",
+                            "plan",
+                            "--session-id",
+                            "agentx-only-plan",
+                            "local plan",
+                        ],
+                        stdout,
+                        stderr,
+                    )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual("fake-local", payload["run"]["provider"])
+            self.assertEqual("fake-local", payload["result"]["provider_id"])
+            self.assertTrue((root / "sessions" / "agentx-only-plan" / "manifest.json").exists())
         finally:
             if root.exists():
                 shutil.rmtree(root)

@@ -55,7 +55,23 @@ class SettingsStoreTests(StoreFixtureTestCase):
 
         self.assertEqual(paths.settings, written)
         self.assertTrue(written.exists())
-        self.assertEqual(settings.as_dict(), json.loads(written.read_text(encoding="utf-8")))
+        self.assertEqual(
+            {
+                "external_max_classification": "internal",
+                "private_provider": "private-local",
+                "providers": {
+                    "codex": {
+                        "auth_check": "codex-auth",
+                        "command": "codex",
+                        "enabled": True,
+                        "endpoint": None,
+                        "subscription_check": None,
+                    }
+                },
+                "public_providers": ["claude", "codex"],
+            },
+            json.loads(written.read_text(encoding="utf-8")),
+        )
 
 
 class SessionAndRunStoreTests(StoreFixtureTestCase):

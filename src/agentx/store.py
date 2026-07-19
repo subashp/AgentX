@@ -68,7 +68,7 @@ class SettingsStore:
             )
 
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        _write_text(self.path, _dump_json(settings.as_dict()))
+        _write_text(self.path, _dump_json(_settings_config_payload(settings)))
         return self.path
 
 
@@ -283,6 +283,18 @@ def _normalize_identifier(value: object, field_name: str) -> str:
 
 def _dump_json(payload: object) -> str:
     return json.dumps(_to_json_data(payload), indent=2, sort_keys=True) + "\n"
+
+
+def _settings_config_payload(settings: Settings) -> dict[str, object]:
+    return {
+        "public_providers": list(settings.public_providers),
+        "private_provider": settings.private_provider,
+        "external_max_classification": settings.external_max_classification,
+        "providers": {
+            provider_id: provider.as_dict()
+            for provider_id, provider in sorted(settings.providers.items())
+        },
+    }
 
 
 def _to_json_data(value: object) -> Any:

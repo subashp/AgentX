@@ -57,6 +57,7 @@ DEFAULT_PROVIDERS: tuple[ProviderDefinition, ...] = (
         None,
         public=False,
     ),
+    ProviderDefinition("fake-local", "AgentX Fake Local", "builtin", None, public=False),
 )
 
 
@@ -98,6 +99,9 @@ class ProviderRegistry:
 
         command = provider_settings.command if provider_settings and provider_settings.command else provider.command
         endpoint = provider_settings.endpoint if provider_settings else None
+
+        if provider.kind == "builtin":
+            return self._checked_status(provider, command, endpoint, None, checks)
 
         if provider.kind == "openai_compatible":
             if endpoint:

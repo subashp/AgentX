@@ -7,11 +7,11 @@ from pathlib import Path
 from typing import Sequence, TextIO
 
 from .adapters import AdapterError, CodexCliAdapter, execute_fake_run
-from .config import ConfigError, load_settings
+from .config import ConfigError, ProviderSettings, Settings, load_settings
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
-from .store import SessionStore, StoreError
+from .store import SessionStore, SettingsStore, StoreError
 from .workspace import WorkspaceError
 
 
@@ -20,6 +20,16 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--json", action="store_true", help="write machine-readable JSON output")
 
     subparsers = parser.add_subparsers(dest="command")
+
+    init = subparsers.add_parser("init", help="initialize AgentX settings")
+    init.add_argument(
+        "--profile",
+        choices=("agentx", "codex"),
+        default="agentx",
+        help="settings profile to write",
+    )
+    init.add_argument("--force", action="store_true", help="overwrite an existing settings file")
+    init.add_argument("--codex-command", default="codex", help="Codex command for the codex profile")
 
     providers = subparsers.add_parser("providers", help="inspect provider availability")
     providers_sub = providers.add_subparsers(dest="providers_command")
@@ -117,6 +127,17 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
             stderr,
         )
 
+    if args.command == "init":
+        return _init(
+            args.profile,
+            args.force,
+            args.codex_command,
+            settings,
+            args.json,
+            stdout,
+            stderr,
+        )
+
     if args.command == "providers" and args.providers_command == "list":
         statuses = ProviderRegistry(settings=settings).list_statuses()
         return _write(
@@ -154,7 +175,11 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
         )
 
     if args.command == "plan":
-        provider = "fake-local" if args.fake else args.provider
+        provider = _resolve_plan_provider(
+            fake=args.fake,
+            requested_provider=args.provider,
+            settings=settings,
+        )
         if provider not in {"auto", "codex", "fake-local"}:
             stderr.write(
                 f"agentx: plan provider '{provider}' is not supported in this phase; use codex or fake-local.\n"
@@ -208,7 +233,7 @@ def _prompt_shorthand(argv: Sequence[str]) -> tuple[bool, str] | None:
         json_output = True
         tokens = tokens[1:]
 
-    if not tokens or tokens[0] in {"providers", "route", "run", "plan", "execute", "config", "-h", "--help"}:
+    if not tokens or tokens[0] in {"init", "providers", "route", "run", "plan", "execute", "config", "-h", "--help"}:
         return None
 
     if tokens[0].startswith("-"):
@@ -236,6 +261,44 @@ def _route(
         stderr.write(f"agentx: {exc}\n")
         return 2
     return _write(decision.as_dict(), json_output, stdout)
+
+
+def _init(
+    profile: str,
+    force: bool,
+    codex_command: str,
+    settings,
+    json_output: bool,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    try:
+        initialized = _settings_for_profile(
+            profile,
+            base=settings,
+            codex_command=codex_command,
+        )
+        store = SettingsStore(settings.paths)
+        if store.path.exists() and not force:
+            stderr.write(
+                f"agentx: settings already exist at {store.path}; pass --force to overwrite.\n"
+            )
+            return 2
+        written = store.write(initialized)
+    except (ConfigError, StoreError, OSError) as exc:
+        stderr.write(f"agentx: {exc}\n")
+        return 2
+
+    return _write(
+        {
+            "profile": profile,
+            "settings_path": str(written),
+            "settings": initialized.as_dict(),
+        },
+        json_output,
+        stdout,
+        text_formatter=_format_init,
+    )
 
 
 def _fake_run(
@@ -270,6 +333,43 @@ def _fake_run(
         stdout,
         text_formatter=_format_fake_run,
     )
+
+
+def _resolve_plan_provider(*, fake: bool, requested_provider: str, settings) -> str:
+    if fake:
+        return "fake-local"
+    normalized = requested_provider.strip().lower()
+    if normalized != "auto":
+        return normalized
+    public_providers = set(settings.public_providers)
+    if "fake-local" in public_providers and "codex" not in public_providers:
+        return "fake-local"
+    return "codex"
+
+
+def _settings_for_profile(
+    profile: str,
+    *,
+    base,
+    codex_command: str,
+) -> Settings:
+    if profile == "agentx":
+        return Settings(
+            paths=base.paths,
+            public_providers=("fake-local",),
+            private_provider=None,
+            external_max_classification=base.external_max_classification,
+            providers={},
+        )
+    if profile == "codex":
+        return Settings(
+            paths=base.paths,
+            public_providers=("codex",),
+            private_provider=None,
+            external_max_classification=base.external_max_classification,
+            providers={"codex": ProviderSettings(command=codex_command)},
+        )
+    raise ConfigError("init profile must be 'agentx' or 'codex'.")
 
 
 def _plan(
@@ -417,6 +517,12 @@ def _format_providers(statuses: list[dict[str, object]]) -> str:
         enabled = "enabled" if status["enabled"] else "disabled"
         lines.append(f"{status['id']}\t{enabled}\t{status['reason']}")
     return "\n".join(lines) + "\n"
+
+
+def _format_init(payload: dict[str, object]) -> str:
+    return (
+        f"initialized AgentX profile '{payload['profile']}' at {payload['settings_path']}\n"
+    )
 
 
 def _format_fake_run(payload: dict[str, object]) -> str:
