@@ -3,9 +3,10 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+from pathlib import Path
 from typing import Sequence, TextIO
 
-from .adapters import AdapterError, execute_fake_run
+from .adapters import AdapterError, CodexCliAdapter, execute_fake_run
 from .config import ConfigError, load_settings
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
 from .providers import ProviderRegistry
@@ -40,7 +41,10 @@ def build_parser() -> argparse.ArgumentParser:
 
     plan = subparsers.add_parser("plan", help="run a read-only plan workflow")
     plan.add_argument("--fake", action="store_true", help="use the deterministic local fake adapter")
+    plan.add_argument("--provider", default="auto", help="provider id or auto")
     plan.add_argument("--session-id", default="local-plan", help="local session/run id")
+    plan.add_argument("--source-root", default=".", help="source workspace root for scoped context")
+    plan.add_argument("--workspace-id", default=None, help="scoped workspace id")
     plan.add_argument("--model-tier", default=None, help="model tier override")
     plan.add_argument("--context", action="append", default=None, help="context path to include")
     plan.add_argument("prompt", nargs="?", default="", help="task prompt")
@@ -150,13 +154,19 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
         )
 
     if args.command == "plan":
-        if not args.fake:
-            stderr.write("agentx: plan currently supports only --fake local execution.\n")
+        provider = "fake-local" if args.fake else args.provider
+        if provider not in {"auto", "codex", "fake-local"}:
+            stderr.write(
+                f"agentx: plan provider '{provider}' is not supported in this phase; use codex or fake-local.\n"
+            )
             return 2
         return _plan(
             args.prompt,
+            provider,
             args.model_tier,
             args.session_id,
+            args.source_root,
+            args.workspace_id,
             tuple(args.context or ()),
             settings,
             args.json,
@@ -264,8 +274,11 @@ def _fake_run(
 
 def _plan(
     prompt: str,
+    provider: str,
     model_tier: str | None,
     session_id: str,
+    source_root: str,
+    workspace_id: str | None,
     context_paths: tuple[str, ...],
     settings,
     json_output: bool,
@@ -273,10 +286,36 @@ def _plan(
     stderr: TextIO,
 ) -> int:
     try:
+        if provider == "fake-local":
+            run_provider = "fake-local"
+            provider_statuses = None
+            adapter = None
+            scoped_source_root = None
+        else:
+            run_provider = "codex"
+            provider_statuses = ProviderRegistry(settings=settings).list_statuses()
+            codex_status = next(
+                (status for status in provider_statuses if status.id == "codex"),
+                None,
+            )
+            if codex_status is None or not codex_status.enabled:
+                reason = "not registered" if codex_status is None else codex_status.reason
+                stderr.write(f"agentx: codex provider is not available: {reason}\n")
+                return 2
+            scoped_workspace = SessionStore(settings.paths).path_for_session(session_id) / "workspace"
+            codex_settings = settings.providers.get("codex")
+            command = codex_settings.command if codex_settings and codex_settings.command else "codex"
+            adapter = CodexCliAdapter(
+                command=command,
+                cwd=scoped_workspace,
+                extra_args=("-C", str(scoped_workspace)),
+            )
+            scoped_source_root = Path(source_root)
+
         run = AgentRun(
             prompt=prompt,
             mode="plan",
-            provider="auto",
+            provider=run_provider,
             model_tier=model_tier,
             context_paths=context_paths,
         )
@@ -285,6 +324,10 @@ def _plan(
             session_store=SessionStore(settings.paths),
             session_id=session_id,
             run=run,
+            provider_statuses=provider_statuses,
+            source_root=scoped_source_root,
+            workspace_id=workspace_id,
+            adapter=adapter,
         )
     except (
         AdapterError,
@@ -296,12 +339,14 @@ def _plan(
         stderr.write(f"agentx: {exc}\n")
         return 2
 
-    return _write(
+    code = 0 if result.stored_run.result.status == "success" else 2
+    _write(
         result.as_dict(),
         json_output,
         stdout,
         text_formatter=_format_plan,
     )
+    return code
 
 
 def _execute(

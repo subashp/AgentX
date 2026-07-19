@@ -211,6 +211,24 @@ class CodexCliAdapterTests(AdapterFixtureTestCase):
         self.assertEqual(7, result.outcome["exit_code"])
         self.assertEqual("", result.patch)
 
+    def test_codex_cli_adapter_forwards_scoped_workspace_argument(self):
+        runner = RecordingProcessRunner(ProcessResult(exit_code=0, stdout="plan", stderr=""))
+        adapter = CodexCliAdapter(
+            command="codex-test",
+            cwd=Path("state/sessions/run/workspace"),
+            extra_args=("-C", "state/sessions/run/workspace"),
+            process_runner=runner,
+        )
+
+        adapter.execute(AdapterRequest(run=AgentRun(prompt="Plan this", provider="codex")))
+
+        argv = runner.calls[0]["argv"]
+        self.assertIn("-C", argv)
+        self.assertEqual(
+            "state/sessions/run/workspace",
+            argv[argv.index("-C") + 1],
+        )
+
     def test_execute_adapter_run_writes_codex_cli_artifacts_without_live_process(self):
         paths = self.make_paths()
         runner = RecordingProcessRunner(ProcessResult(exit_code=0, stdout="1. inspect\n", stderr=""))

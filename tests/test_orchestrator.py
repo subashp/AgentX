@@ -203,6 +203,152 @@ class PlanModeOrchestratorTests(OrchestratorFixtureTestCase):
         self.assertEqual("fake-local", result.route.selected_provider)
         self.assertEqual("success", result.stored_run.result.status)
 
+    def test_codex_plan_materializes_scoped_workspace_with_withheld_placeholders(self):
+        settings = Settings(
+            paths=self.make_settings().paths,
+            public_providers=("codex",),
+        )
+        source = self.fixture_root / "source"
+        (source / "secrets").mkdir(parents=True)
+        (source / "README.md").write_text("# Visible\n", encoding="utf-8")
+        (source / "secrets" / "token.txt").write_text(
+            "fixture-secret-marker\n",
+            encoding="utf-8",
+        )
+        adapter = RecordingPlanAdapter(provider_id="codex")
+
+        result = execute_plan_mode(
+            settings=settings,
+            session_store=SessionStore(settings.paths),
+            session_id="codex-workspace",
+            run=AgentRun(
+                prompt="Plan with filtered context",
+                mode="plan",
+                provider="codex",
+                context_paths=("README.md", "secrets/token.txt"),
+            ),
+            provider_statuses=(
+                ProviderStatus(
+                    id="codex",
+                    display_name="Codex CLI",
+                    kind="cli",
+                    enabled=True,
+                    reason="available",
+                ),
+            ),
+            policy=Policy(
+                classification_rules={
+                    "README.md": "internal",
+                    "secrets/**": "secret",
+                }
+            ),
+            source_root=source,
+            workspace_id="scoped-demo",
+            adapter=adapter,
+        )
+
+        workspace = result.stored_run.root / "workspace"
+        self.assertEqual(1, adapter.calls)
+        self.assertEqual("success", result.stored_run.result.status)
+        self.assertEqual("# Visible\n", (workspace / "README.md").read_text(encoding="utf-8"))
+        placeholder = (workspace / "secrets" / "token.txt").read_text(encoding="utf-8")
+        self.assertIn("AgentX withheld file", placeholder)
+        self.assertIn("Classification: secret", placeholder)
+        self.assertNotIn("fixture-secret-marker", placeholder)
+        self.assertEqual("# Visible\n", (source / "README.md").read_text(encoding="utf-8"))
+
+        snapshot = _read_artifacts(result.stored_run.root)
+        self.assertNotIn("fixture-secret-marker", "".join(snapshot.values()))
+        context_map = json.loads(snapshot["context-map.json"])
+        self.assertEqual(["README.md"], context_map["included_paths"])
+        self.assertEqual(["secrets/token.txt"], context_map["excluded_paths"])
+        self.assertTrue(context_map["scoped_workspace"]["ok"])
+        self.assertEqual("scoped-demo", context_map["scoped_workspace"]["workspace_id"])
+        outcome = json.loads(snapshot["outcome.json"])
+        self.assertTrue(outcome["scoped_workspace"]["ok"])
+        self.assertEqual("", snapshot["patch.diff"])
+
+    def test_plan_workspace_materialization_failure_writes_artifacts_without_provider_call(self):
+        settings = Settings(
+            paths=self.make_settings().paths,
+            public_providers=("codex",),
+        )
+        source = self.fixture_root / "source"
+        source.mkdir()
+        adapter = RecordingPlanAdapter(provider_id="codex")
+
+        result = execute_plan_mode(
+            settings=settings,
+            session_store=SessionStore(settings.paths),
+            session_id="codex-workspace-failure",
+            run=AgentRun(
+                prompt="Plan with missing context",
+                mode="plan",
+                provider="codex",
+                context_paths=("README.md",),
+            ),
+            provider_statuses=(
+                ProviderStatus(
+                    id="codex",
+                    display_name="Codex CLI",
+                    kind="cli",
+                    enabled=True,
+                    reason="available",
+                ),
+            ),
+            source_root=source,
+            adapter=adapter,
+        )
+
+        self.assertEqual(0, adapter.calls)
+        self.assertEqual("failure", result.stored_run.result.status)
+        snapshot = _read_artifacts(result.stored_run.root)
+        self.assertEqual("", snapshot["patch.diff"])
+        context_map = json.loads(snapshot["context-map.json"])
+        self.assertFalse(context_map["scoped_workspace"]["ok"])
+        transcript = [json.loads(line) for line in snapshot["transcript.jsonl"].splitlines()]
+        self.assertEqual("workspace_materialization_failed", transcript[0]["event"])
+        outcome = json.loads(snapshot["outcome.json"])
+        self.assertEqual("scoped_workspace_materialization_failed", outcome["outcome"])
+        self.assertFalse(outcome["scoped_workspace"]["ok"])
+
+    def test_disabled_live_provider_status_is_not_invoked_by_direct_orchestrator_call(self):
+        settings = Settings(
+            paths=self.make_settings().paths,
+            public_providers=("codex",),
+        )
+        adapter = RecordingPlanAdapter(provider_id="codex")
+
+        result = execute_plan_mode(
+            settings=settings,
+            session_store=SessionStore(settings.paths),
+            session_id="codex-disabled",
+            run=AgentRun(
+                prompt="Plan without an available provider",
+                mode="plan",
+                provider="codex",
+            ),
+            provider_statuses=(
+                ProviderStatus(
+                    id="codex",
+                    display_name="Codex CLI",
+                    kind="cli",
+                    enabled=False,
+                    reason="disabled_missing_binary",
+                ),
+            ),
+            adapter=adapter,
+        )
+
+        self.assertEqual(0, adapter.calls)
+        self.assertEqual("failure", result.stored_run.result.status)
+        snapshot = _read_artifacts(result.stored_run.root)
+        transcript = [json.loads(line) for line in snapshot["transcript.jsonl"].splitlines()]
+        self.assertEqual("provider_not_invoked", transcript[0]["event"])
+        outcome = json.loads(snapshot["outcome.json"])
+        self.assertEqual("provider_not_invoked", outcome["outcome"])
+        self.assertIn("disabled_missing_binary", outcome["summary"])
+
 
 class ExecuteModeOrchestratorTests(OrchestratorFixtureTestCase):
     maxDiff = None
@@ -362,6 +508,28 @@ class ExecuteModeOrchestratorTests(OrchestratorFixtureTestCase):
             outcome["patch_validation"]["secret_findings"],
         )
         self.assertNotIn(marker, "".join(snapshot.values()))
+
+
+class RecordingPlanAdapter:
+    def __init__(self, provider_id="codex", status="success"):
+        self.provider_id = provider_id
+        self.status = status
+        self.calls = 0
+
+    def execute(self, request: AdapterRequest) -> AdapterResult:
+        self.calls += 1
+        return AdapterResult(
+            provider_id=self.provider_id,
+            model_id=f"{self.provider_id}-model",
+            model_tier="high",
+            status=self.status,
+            transcript_events=(
+                {"sequence": 1, "event": "execution_completed", "status": self.status},
+            ),
+            cost={"currency": "USD", "estimated": False, "total_cost_usd": 0.0},
+            outcome={"status": self.status, "outcome": "recorded_plan_completed"},
+            patch="diff --git a/README.md b/README.md\n",
+        )
 
 
 class PatchyAdapter:

@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import shutil
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
+from pathlib import Path
 
 from .adapters import (
     AdapterRequest,
@@ -23,7 +25,15 @@ from .policy import Policy
 from .providers import ProviderStatus
 from .routing import AgentRun, RouteDecision, Router
 from .store import SessionStore
-from .workspace import PatchValidationResult, SecretScanner, validate_patch_paths
+from .workspace import (
+    PatchValidationResult,
+    ScopedWorkspaceConfig,
+    SecretScanner,
+    WithheldPathSummary,
+    WorkspaceMaterializationResult,
+    materialize_scoped_workspace,
+    validate_patch_paths,
+)
 
 
 class OrchestratorError(ValueError):
@@ -96,6 +106,8 @@ def execute_plan_mode(
     memories: Sequence[MemoryRecord] = (),
     context_paths: Sequence[str] | None = None,
     inferred_context_paths: Sequence[str] = (),
+    source_root: str | Path | None = None,
+    workspace_id: str | None = None,
     adapter: ProviderAdapter | None = None,
 ) -> PlanModeResult:
     """Run a plan-only workflow and persist standard local artifacts.
@@ -136,7 +148,38 @@ def execute_plan_mode(
     context_map = _context_map_from_manifest(context_manifest, route)
     memory_map = _memory_map_from_manifest(context_manifest)
     redactions = [entry.as_dict() for entry in context_manifest.redactions]
-    read_only_adapter = _ReadOnlyPlanAdapter(adapter or FakeLocalAdapter())
+    selected_adapter = adapter or FakeLocalAdapter()
+    provider_selection_error = _provider_selection_error(selected_adapter, route)
+    workspace_materialization: WorkspaceMaterializationResult | None = None
+    workspace_metadata: dict[str, object] | None = None
+    if source_root is not None and provider_selection_error is None:
+        workspace_materialization = _materialize_plan_workspace(
+            session_store=session_store,
+            session_id=session_id,
+            source_root=source_root,
+            context_manifest=context_manifest,
+        )
+        workspace_metadata = _workspace_metadata(
+            workspace_materialization,
+            workspace_id=workspace_id,
+            default_workspace_id=session_id,
+        )
+        context_map["scoped_workspace"] = workspace_metadata
+
+    if provider_selection_error is not None:
+        selected_adapter = _ProviderSelectionFailureAdapter(
+            provider_id=selected_adapter.provider_id,
+            reason=provider_selection_error,
+        )
+    elif workspace_materialization is not None and not workspace_materialization.ok:
+        selected_adapter = _WorkspaceMaterializationFailureAdapter(
+            provider_id=selected_adapter.provider_id,
+            workspace_materialization=workspace_materialization,
+        )
+    read_only_adapter = _ReadOnlyPlanAdapter(
+        selected_adapter,
+        workspace_materialization=workspace_metadata,
+    )
 
     stored = execute_adapter_run(
         session_store=session_store,
@@ -244,6 +287,7 @@ def execute_execute_mode(
 @dataclass(frozen=True)
 class _ReadOnlyPlanAdapter:
     adapter: ProviderAdapter
+    workspace_materialization: Mapping[str, object] | None = None
 
     @property
     def provider_id(self) -> str:
@@ -253,12 +297,100 @@ class _ReadOnlyPlanAdapter:
         result = self.adapter.execute(request)
         if not isinstance(result, AdapterResult):
             raise OrchestratorError("adapter.execute must return an AdapterResult.")
-        if result.patch == "":
-            return result
         outcome = dict(result.outcome)
-        outcome["patch_suppressed"] = True
-        outcome["patch_applied"] = False
+        if self.workspace_materialization is not None:
+            outcome["scoped_workspace"] = dict(self.workspace_materialization)
+        if result.patch == "" and outcome == dict(result.outcome):
+            return result
+        if result.patch != "":
+            outcome["patch_suppressed"] = True
+            outcome["patch_applied"] = False
         return replace(result, patch="", outcome=outcome)
+
+
+@dataclass(frozen=True)
+class _WorkspaceMaterializationFailureAdapter:
+    provider_id: str
+    workspace_materialization: WorkspaceMaterializationResult
+
+    def execute(self, request: AdapterRequest) -> AdapterResult:
+        route = request.route
+        model_tier = route.selected_model_tier if route is not None else "high"
+        errors = [
+            event.as_dict()
+            for event in self.workspace_materialization.events
+            if event.severity == "error"
+        ]
+        return AdapterResult(
+            provider_id=self.provider_id,
+            model_id=None,
+            model_tier=model_tier,
+            status="failure",
+            transcript_events=(
+                {
+                    "sequence": 1,
+                    "event": "workspace_materialization_failed",
+                    "provider_id": self.provider_id,
+                    "mode": request.run.mode,
+                    "errors": errors,
+                },
+            ),
+            cost={
+                "currency": "USD",
+                "estimated": False,
+                "known": True,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_cost_usd": 0.0,
+            },
+            outcome={
+                "status": "failure",
+                "outcome": "scoped_workspace_materialization_failed",
+                "summary": "AgentX did not invoke the provider because scoped workspace materialization failed.",
+                "patch_applied": False,
+            },
+            patch="",
+        )
+
+
+@dataclass(frozen=True)
+class _ProviderSelectionFailureAdapter:
+    provider_id: str
+    reason: str
+
+    def execute(self, request: AdapterRequest) -> AdapterResult:
+        route = request.route
+        model_tier = route.selected_model_tier if route is not None else "high"
+        return AdapterResult(
+            provider_id=self.provider_id,
+            model_id=None,
+            model_tier=model_tier,
+            status="failure",
+            transcript_events=(
+                {
+                    "sequence": 1,
+                    "event": "provider_not_invoked",
+                    "provider_id": self.provider_id,
+                    "mode": request.run.mode,
+                    "reason": self.reason,
+                },
+            ),
+            cost={
+                "currency": "USD",
+                "estimated": False,
+                "known": True,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_cost_usd": 0.0,
+            },
+            outcome={
+                "status": "failure",
+                "outcome": "provider_not_invoked",
+                "summary": self.reason,
+                "patch_applied": False,
+            },
+            patch="",
+        )
 
 
 @dataclass
@@ -499,6 +631,101 @@ def _memory_map_from_manifest(manifest: ContextManifest) -> dict[str, object]:
         "excluded_memories": by_action["exclude"],
         "memory_exposure": exposure,
     }
+
+
+def _provider_selection_error(
+    adapter: ProviderAdapter,
+    route: RouteDecision,
+) -> str | None:
+    selected = route.selected_provider
+    if selected == adapter.provider_id:
+        return None
+    if selected is None:
+        report = next(
+            (
+                provider_report
+                for provider_report in route.provider_reports
+                if provider_report.id == adapter.provider_id
+            ),
+            None,
+        )
+        if report is not None and report.reason in _FILTERABLE_CONTEXT_REJECTION_REASONS:
+            return None
+        if report is not None:
+            return (
+                f"Provider '{adapter.provider_id}' was not invoked because routing rejected it: {report.reason}."
+            )
+        return (
+            f"Provider '{adapter.provider_id}' was not invoked because routing did not select an eligible provider."
+        )
+    return (
+        f"Provider '{adapter.provider_id}' was not invoked because routing selected provider '{selected}'."
+    )
+
+
+_FILTERABLE_CONTEXT_REJECTION_REASONS: frozenset[str] = frozenset(
+    {
+        "classification_exceeds_external_max",
+        "classification_routing_restricted",
+        "policy_restricted",
+        "secret_requires_explicit_routing",
+        "unclassified_requires_private",
+    }
+)
+
+
+def _materialize_plan_workspace(
+    *,
+    session_store: SessionStore,
+    session_id: str,
+    source_root: str | Path,
+    context_manifest: ContextManifest,
+) -> WorkspaceMaterializationResult:
+    session_root = session_store.path_for_session(session_id)
+    workspace_root = session_root / "workspace"
+    if workspace_root.exists():
+        shutil.rmtree(workspace_root)
+
+    summaries_by_path = {
+        entry.target_id: entry
+        for entry in context_manifest.summary_substitutions
+        if entry.target_type == "path"
+    }
+    withheld_paths = []
+    for path in context_manifest.excluded_paths:
+        summary = summaries_by_path.get(path)
+        withheld_paths.append(
+            WithheldPathSummary(
+                path=path,
+                classification=context_manifest.classification_by_path.get(path),
+                reason=(
+                    summary.reason
+                    if summary is not None
+                    else "withheld_by_context_policy"
+                ),
+                summary=None if summary is None else summary.summary,
+            )
+        )
+
+    return materialize_scoped_workspace(
+        ScopedWorkspaceConfig.plan(
+            source_root=Path(source_root),
+            workspace_root=workspace_root,
+            allowed_paths=context_manifest.included_paths,
+            withheld_paths=withheld_paths,
+        )
+    )
+
+
+def _workspace_metadata(
+    materialization: WorkspaceMaterializationResult,
+    *,
+    workspace_id: str | None,
+    default_workspace_id: str,
+) -> dict[str, object]:
+    metadata = materialization.as_dict()
+    metadata["workspace_id"] = workspace_id or default_workspace_id
+    return metadata
 
 
 __all__ = [

@@ -22,6 +22,7 @@ below assume `src` is already importable.
 python -m agentx providers list
 python -m agentx route "summarize the routing module"
 python -m agentx plan --fake --context README.md "plan a documentation cleanup"
+python -m agentx plan --provider codex --context README.md "plan a documentation cleanup"
 python -m agentx execute --fake --allowed-patch README.md "try an offline execute run"
 python -m agentx config path
 python -m agentx config show
@@ -48,8 +49,10 @@ The public CLI currently supports:
 
 - `providers list`: inspect configured provider availability.
 - `route`: explain provider and model-tier routing without running a provider.
-- `plan --fake`: run the deterministic offline plan workflow and write local
-  artifacts.
+- `plan --fake` or `plan --provider fake-local`: run the deterministic offline
+  plan workflow and write local artifacts.
+- `plan --provider codex`: run a live Codex CLI plan against a scoped read-only
+  workspace built from policy-visible context.
 - `execute --fake`: run the deterministic offline execute workflow, validate any
   adapter patch output, and write local artifacts without applying source
   mutations.
@@ -57,11 +60,8 @@ The public CLI currently supports:
 - `config path`: show the resolved AgentX state paths.
 - `config show`: show resolved settings.
 
-Live provider execution is intentionally not exposed through `plan` or
-`execute` yet. Current live-provider and cloud-provider work is represented by
-adapter contracts and source-level wiring points, including CLI process adapters
-and a private OpenAI-compatible chat-completions adapter. Those integrations are
-optional wiring points until they are exposed by the public CLI.
+Live execution is exposed only for Codex plan mode in this phase. Execute/apply
+mode remains fake-only and never applies source mutations.
 
 ## Privacy Model
 
@@ -117,10 +117,17 @@ Environment overrides can redirect the state root or individual state areas:
 - `AGENTX_AUTH`: service-scoped authentication material directory.
 
 Run artifacts are local by default and should not be committed unless
-intentionally exported. Fake plan and execute runs write artifacts such as
+intentionally exported. Plan and execute runs write artifacts such as
 `manifest.json`, `prompt.md`, `context-map.json`, `memory-map.json`,
 `redactions.json`, `provider.json`, `transcript.jsonl`, `patch.diff`,
 `cost.json`, and `outcome.json` under a session directory.
+
+For private demos or local experiments, keep AgentX state outside the source
+checkout. For example, set `AGENTX_HOME` to a private state directory and store
+provider defaults, sessions, memories, and auth material there. A Codex-only
+demo settings file can set `public_providers` to `["codex"]` and optionally set
+`providers.codex.command` when the Codex CLI is not on `PATH`. Do not create or
+commit a repository-local `.agentx` directory for this setup.
 
 ## Provider Model
 

@@ -5,8 +5,10 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from agentx.adapters import AdapterResult
 from agentx import cli
-from agentx.config import AgentXPaths, Settings
+from agentx.config import AgentXPaths, ProviderSettings, Settings
+from agentx.providers import ProviderStatus
 
 
 class CliTests(unittest.TestCase):
@@ -186,15 +188,180 @@ class CliTests(unittest.TestCase):
             if root.exists():
                 shutil.rmtree(root)
 
-    def test_plan_requires_fake_until_live_plan_execution_is_supported(self):
+    def test_plan_reports_unavailable_codex_without_running_provider(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_codex_unavailable"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                )
+            )
+            statuses = (
+                ProviderStatus(
+                    id="codex",
+                    display_name="Codex CLI",
+                    kind="cli",
+                    enabled=False,
+                    reason="disabled_missing_binary",
+                ),
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                    registry.return_value.list_statuses.return_value = statuses
+                    code = cli.run(["plan", "local plan"], stdout, stderr)
+
+            self.assertEqual(2, code)
+            self.assertEqual("", stdout.getvalue())
+            self.assertIn("codex provider is not available", stderr.getvalue())
+            self.assertFalse((root / "sessions").exists())
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
+    def test_plan_rejects_unsupported_live_provider(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        code = cli.run(["plan", "local plan"], stdout, stderr)
+        code = cli.run(["plan", "--provider", "claude", "local plan"], stdout, stderr)
 
         self.assertEqual(2, code)
         self.assertEqual("", stdout.getvalue())
-        self.assertIn("plan currently supports only --fake", stderr.getvalue())
+        self.assertIn("provider 'claude' is not supported", stderr.getvalue())
+
+    def test_provider_fake_local_matches_fake_shorthand_without_registry(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_plan_alias"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                ),
+                public_providers=("fake-local",),
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                    registry.side_effect = AssertionError("provider registry was used")
+                    code = cli.run(
+                        [
+                            "--json",
+                            "plan",
+                            "--provider",
+                            "fake-local",
+                            "--session-id",
+                            "cli-plan-alias",
+                            "local plan",
+                        ],
+                        stdout,
+                        stderr,
+                    )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual("fake-local", payload["run"]["provider"])
+            self.assertEqual("fake-local", payload["result"]["provider_id"])
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
+    def test_codex_plan_uses_registry_scoped_workspace_and_configured_command(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_codex"
+        if root.exists():
+            shutil.rmtree(root)
+        source = root / "source"
+        source.mkdir(parents=True)
+        (source / "README.md").write_text("# Visible\n", encoding="utf-8")
+        state = root / "state"
+
+        settings = Settings(
+            paths=AgentXPaths(
+                root=state,
+                settings=state / "settings.json",
+                sessions=state / "sessions",
+                memories=state / "memories",
+                auth=state / "auth",
+            ),
+            public_providers=("codex",),
+            providers={"codex": ProviderSettings(command="codex-under-test")},
+        )
+        statuses = (
+            ProviderStatus(
+                id="codex",
+                display_name="Codex CLI",
+                kind="cli",
+                enabled=True,
+                reason="available",
+                command="codex-under-test",
+                resolved_command="codex-under-test",
+            ),
+        )
+
+        RecordingCodexAdapter.instances.clear()
+        try:
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                    registry.return_value.list_statuses.return_value = statuses
+                    with mock.patch("agentx.cli.CodexCliAdapter", RecordingCodexAdapter):
+                        code = cli.run(
+                            [
+                                "--json",
+                                "plan",
+                                "--provider",
+                                "codex",
+                                "--session-id",
+                                "cli-codex",
+                                "--source-root",
+                                str(source),
+                                "--workspace-id",
+                                "demo-workspace",
+                                "--context",
+                                "README.md",
+                                "live plan",
+                            ],
+                            stdout,
+                            stderr,
+                        )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            registry.return_value.list_statuses.assert_called_once()
+            payload = json.loads(stdout.getvalue())
+            workspace = state / "sessions" / "cli-codex" / "workspace"
+            self.assertEqual("codex", payload["run"]["provider"])
+            self.assertEqual("codex", payload["result"]["provider_id"])
+            self.assertEqual("success", payload["result"]["status"])
+            self.assertEqual("# Visible\n", (workspace / "README.md").read_text(encoding="utf-8"))
+            adapter = RecordingCodexAdapter.instances[0]
+            self.assertEqual("codex-under-test", adapter.command)
+            self.assertEqual(workspace, adapter.cwd)
+            self.assertEqual(("-C", str(workspace)), adapter.extra_args)
+            scoped = payload["result"]["outcome"]["scoped_workspace"]
+            self.assertTrue(scoped["ok"])
+            self.assertEqual("demo-workspace", scoped["workspace_id"])
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
 
     def test_execute_outputs_json_and_writes_validation_artifacts_without_provider_registry(self):
         stdout = io.StringIO()
@@ -274,6 +441,33 @@ class CliTests(unittest.TestCase):
         self.assertEqual("", stdout.getvalue())
         self.assertIn("agentx: storage unavailable", stderr.getvalue())
         self.assertNotIn("Traceback", stderr.getvalue())
+
+
+class RecordingCodexAdapter:
+    provider_id = "codex"
+    instances = []
+
+    def __init__(self, *, command, cwd, extra_args):
+        self.command = command
+        self.cwd = cwd
+        self.extra_args = tuple(extra_args)
+        self.requests = []
+        self.instances.append(self)
+
+    def execute(self, request):
+        self.requests.append(request)
+        return AdapterResult(
+            provider_id=self.provider_id,
+            model_id="codex-test",
+            model_tier="high",
+            status="success",
+            transcript_events=(
+                {"sequence": 1, "event": "execution_completed", "status": "success"},
+            ),
+            cost={"currency": "USD", "estimated": False, "total_cost_usd": 0.0},
+            outcome={"status": "success", "outcome": "codex_test_completed"},
+            patch="diff --git a/README.md b/README.md\n",
+        )
 
 
 if __name__ == "__main__":
