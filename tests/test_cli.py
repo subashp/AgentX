@@ -624,8 +624,9 @@ class CliTests(unittest.TestCase):
             self.assertEqual("# Visible\n", (workspace / "README.md").read_text(encoding="utf-8"))
             adapter = RecordingCodexAdapter.instances[0]
             self.assertEqual("codex-under-test", adapter.command)
-            self.assertEqual(workspace, adapter.cwd)
-            self.assertEqual(("-C", str(workspace)), adapter.extra_args)
+            absolute_workspace = workspace.resolve()
+            self.assertEqual(absolute_workspace, adapter.cwd)
+            self.assertEqual(("-C", str(absolute_workspace)), adapter.extra_args)
             scoped = payload["result"]["outcome"]["scoped_workspace"]
             self.assertTrue(scoped["ok"])
             self.assertEqual("demo-workspace", scoped["workspace_id"])

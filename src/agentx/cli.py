@@ -577,7 +577,13 @@ def _plan(
                 reason = "not registered" if codex_status is None else codex_status.reason
                 stderr.write(f"agentx: codex provider is not available: {reason}\n")
                 return 2
-            scoped_workspace = SessionStore(settings.paths).path_for_session(session_id) / "workspace"
+            # The provider process starts in this directory, so pass an
+            # absolute path to both subprocess cwd and Codex -C.  A relative
+            # AGENTX_HOME would otherwise make Codex resolve -C against the
+            # already-changed cwd and look for a duplicated nested path.
+            scoped_workspace = (
+                SessionStore(settings.paths).path_for_session(session_id) / "workspace"
+            ).resolve()
             codex_settings = settings.providers.get("codex")
             command = codex_settings.command if codex_settings and codex_settings.command else "codex"
             adapter = CodexCliAdapter(
