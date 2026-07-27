@@ -1,0 +1,32 @@
+# Private agent instructions and local agent state
+AGENTS.md
+.agents/
+.codex/
+.agentx/
+docs/private/
+docs/implementation-plan.md
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+
+# Python caches and build output
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+build/
+dist/
+
+# Local run logs and temporary validation output
+*.log
+*.out
+*.err
+*.diff
+.tmp/
+.tmp-tests/

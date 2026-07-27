@@ -45,6 +45,96 @@ agentx providers list
 agentx plan --fake "plan with the deterministic local adapter"
 ```
 
+## Provider Usage
+
+AgentX can inspect provider availability, explain a route, and run the live
+provider workflows exposed by the current CLI. Provider selection is policy-
+filtered before a provider receives context.
+
+### Codex
+
+Initialize a Codex profile, then run a read-only plan against a scoped
+workspace:
+
+```sh
+python -m agentx init --profile codex --codex-command codex --force
+python -m agentx providers list
+python -m agentx plan --provider codex --context README.md \
+  "review the README and propose documentation improvements"
+```
+
+The Codex command must be installed and authenticated separately. AgentX stores
+the plan transcript and policy artifacts under the configured local state root;
+it does not apply source changes in plan mode.
+
+### Claude
+
+Claude Code can be discovered and included in route explanations when its CLI
+is installed and enabled in settings:
+
+```sh
+python -m agentx providers list
+python -m agentx route --provider claude --mode review --explain \
+  "review the authentication module for design risks"
+```
+
+The current public CLI does not yet execute live Claude plans. In this phase,
+the Claude adapter is represented by provider discovery and routing contracts;
+`plan --provider claude` will report that live Claude execution is not yet
+supported.
+
+### Self-hosted models, such as Qwen3-Coder
+
+Self-hosted models can be represented through an OpenAI-compatible `/v1` chat
+endpoint. Configure the endpoint in an AgentX settings document, keeping the
+file and any authentication material outside the source checkout:
+
+```json
+{
+  "public_providers": ["codex", "claude"],
+  "private_provider": "private-openai-compatible",
+  "external_max_classification": "internal",
+  "providers": {
+    "private-openai-compatible": {
+      "endpoint": "http://127.0.0.1:8000/v1",
+      "enabled": true
+    }
+  }
+}
+```
+
+Point AgentX at that settings file and inspect the endpoint and policy route:
+
+```sh
+export AGENTX_SETTINGS=/path/to/agentx-settings.json
+python -m agentx providers list
+python -m agentx route --provider private-openai-compatible --explain \
+  "summarize the private planner implementation"
+```
+
+The endpoint must already be running; AgentX does not provision model weights,
+start a Qwen3-Coder server, or manage cloud compute in this release. The
+OpenAI-compatible adapter exists as a provider contract, but live private
+endpoint execution is not yet exposed through the public CLI.
+
+### Automatic routing across providers
+
+Use `auto` to inspect the providers that pass availability and privacy policy
+filters:
+
+```sh
+python -m agentx route --provider auto --mode review --explain \
+  "review the current change and identify the least expensive suitable route"
+```
+
+The routing library supports model profiles with economy, standard, and high
+tiers and can select the lowest-cost eligible model when a `ModelCatalog` is
+provided. The current CLI does not yet load a persistent cost catalog, so its
+automatic route command is a policy and availability dry run rather than a
+complete cost-optimized provider execution workflow. Cost-aware live routing
+will become the default once model catalog configuration and the remaining
+provider adapters are exposed through the CLI.
+
 ## Current CLI
 
 The public CLI currently supports:
