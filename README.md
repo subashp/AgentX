@@ -191,15 +191,3 @@ python -m unittest discover -s tests
 
 Routine tests use deterministic fixtures and fakes. They should not require live
 provider credentials, subscriptions, cloud infrastructure, or network access.
-
-## Public Release Checklist
-
-Before a public release or README-facing example update:
-
-- Confirm README commands match the current CLI parser.
-- Verify fake plan and execute examples run offline.
-- Confirm public docs do not include private paths, credentials, local workflow
-  details, ignored directories, generated run logs, model weights, or datasets.
-- Describe live provider and cloud behavior only where it is exposed through the
-  public CLI; otherwise call it an adapter contract or optional future wiring.
-- Run the focused tests or full test suite and record the command used.
