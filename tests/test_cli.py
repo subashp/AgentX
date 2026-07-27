@@ -214,6 +214,54 @@ class CliTests(unittest.TestCase):
         self.assertEqual("codex", plan.call_args.args[1])
         self.assertIn("agentx[codex]>", stdout.getvalue())
 
+    def test_plan_formatter_surfaces_provider_stdout_and_stderr(self):
+        rendered = cli._format_plan(
+            {
+                "root": "state/session",
+                "route": {"explanation": "Selected provider 'codex'."},
+                "result": {
+                    "status": "success",
+                    "transcript_events": [
+                        {
+                            "event": "process_output_captured",
+                            "stdout": "Codex response",
+                            "stderr": "Codex warning",
+                        }
+                    ],
+                    "outcome": {},
+                },
+            }
+        )
+
+        self.assertIn("Codex response", rendered)
+        self.assertIn("provider stderr:", rendered)
+        self.assertIn("Codex warning", rendered)
+
+    def test_plan_formatter_surfaces_provider_failure(self):
+        rendered = cli._format_plan(
+            {
+                "root": "state/session",
+                "route": {"explanation": "Selected provider 'codex'."},
+                "result": {
+                    "status": "failure",
+                    "transcript_events": [
+                        {
+                            "event": "process_output_captured",
+                            "stdout": "",
+                            "stderr": "unsupported option",
+                        }
+                    ],
+                    "outcome": {
+                        "summary": "Codex CLI exited with code 2.",
+                    },
+                },
+            }
+        )
+
+        self.assertIn("provider error:", rendered)
+        self.assertIn("unsupported option", rendered)
+        self.assertIn("provider status: Codex CLI exited with code 2.", rendered)
+
     def test_route_rejects_invalid_mode(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

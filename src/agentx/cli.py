@@ -706,10 +706,34 @@ def _format_fake_run(payload: dict[str, object]) -> str:
 
 def _format_plan(payload: dict[str, object]) -> str:
     route = payload["route"]
-    return (
+    result = payload.get("result", {})
+    lines = [
         f"wrote plan artifacts to {payload['root']}\n"
-        f"{route['explanation']}\n"
-    )
+        f"{route['explanation']}"
+    ]
+    if isinstance(result, dict):
+        output_event = next(
+            (
+                event
+                for event in result.get("transcript_events", ())
+                if isinstance(event, dict) and event.get("event") == "process_output_captured"
+            ),
+            None,
+        )
+        if isinstance(output_event, dict):
+            stdout_text = str(output_event.get("stdout") or "").strip()
+            stderr_text = str(output_event.get("stderr") or "").strip()
+            if stdout_text:
+                lines.extend(("", stdout_text))
+            if stderr_text:
+                label = "provider error" if result.get("status") != "success" else "provider stderr"
+                lines.extend(("", f"{label}:", stderr_text))
+        if result.get("status") != "success":
+            outcome = result.get("outcome", {})
+            summary = outcome.get("summary") if isinstance(outcome, dict) else None
+            if summary:
+                lines.extend(("", f"provider status: {summary}"))
+    return "\n".join(lines) + "\n"
 
 
 def _format_execute(payload: dict[str, object]) -> str:

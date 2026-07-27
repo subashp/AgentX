@@ -338,8 +338,7 @@ class CodexCliAdapter:
             "exec",
             "--sandbox",
             "read-only",
-            "--ask-for-approval",
-            "never",
+            "--skip-git-repo-check",
             *self.extra_args,
             prompt,
         )
