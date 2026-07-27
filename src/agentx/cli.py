@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import json
 import sys
+import uuid
 from pathlib import Path
 from typing import Sequence, TextIO
 
@@ -18,6 +19,13 @@ from .workspace import WorkspaceError
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentx", description="Provider-neutral agentic coding gateway")
     parser.add_argument("--json", action="store_true", help="write machine-readable JSON output")
+    parser.add_argument(
+        "--provider",
+        dest="global_provider",
+        default=None,
+        metavar="PROVIDER",
+        help="provider to use when entering interactive mode (default: auto)",
+    )
 
     subparsers = parser.add_subparsers(dest="command")
 
@@ -30,6 +38,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     init.add_argument("--force", action="store_true", help="overwrite an existing settings file")
     init.add_argument("--codex-command", default="codex", help="Codex command for the codex profile")
+
+    interactive = subparsers.add_parser(
+        "interactive",
+        aliases=("shell",),
+        help="enter the provider-aware interactive CLI",
+    )
+    interactive.add_argument(
+        "--provider",
+        default=None,
+        metavar="PROVIDER",
+        help="provider to use for this session (default: prompt for auto)",
+    )
 
     providers = subparsers.add_parser("providers", help="inspect provider availability")
     providers_sub = providers.add_subparsers(dest="providers_command")
@@ -92,10 +112,16 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def main(argv: Sequence[str] | None = None) -> int:
-    return run(argv or sys.argv[1:], sys.stdout, sys.stderr)
+    return run(sys.argv[1:] if argv is None else argv, sys.stdout, sys.stderr)
 
 
-def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
+def run(
+    argv: Sequence[str],
+    stdout: TextIO,
+    stderr: TextIO,
+    stdin: TextIO | None = None,
+) -> int:
+    input_stream = sys.stdin if stdin is None else stdin
     shorthand = _prompt_shorthand(argv)
     if shorthand is not None:
         json_output, prompt = shorthand
@@ -119,12 +145,24 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
         return _route(
             args.prompt_shorthand,
             "plan",
-            "auto",
+            args.global_provider or "auto",
             None,
             settings,
             args.json,
             stdout,
             stderr,
+        )
+
+    if args.command is None:
+        if args.json:
+            stderr.write("agentx: interactive mode does not support --json; use a subcommand.\n")
+            return 2
+        return _interactive(
+            settings,
+            provider=args.global_provider,
+            stdin=input_stream,
+            stdout=stdout,
+            stderr=stderr,
         )
 
     if args.command == "init":
@@ -136,6 +174,18 @@ def run(argv: Sequence[str], stdout: TextIO, stderr: TextIO) -> int:
             args.json,
             stdout,
             stderr,
+        )
+
+    if args.command in {"interactive", "shell"}:
+        if args.json:
+            stderr.write("agentx: interactive mode does not support --json; use a subcommand.\n")
+            return 2
+        return _interactive(
+            settings,
+            provider=args.provider,
+            stdin=input_stream,
+            stdout=stdout,
+            stderr=stderr,
         )
 
     if args.command == "providers" and args.providers_command == "list":
@@ -233,13 +283,138 @@ def _prompt_shorthand(argv: Sequence[str]) -> tuple[bool, str] | None:
         json_output = True
         tokens = tokens[1:]
 
-    if not tokens or tokens[0] in {"init", "providers", "route", "run", "plan", "execute", "config", "-h", "--help"}:
+    if not tokens or tokens[0] in {
+        "init",
+        "interactive",
+        "shell",
+        "providers",
+        "route",
+        "run",
+        "plan",
+        "execute",
+        "config",
+        "-h",
+        "--help",
+    }:
         return None
 
     if tokens[0].startswith("-"):
         return None
 
     return json_output, " ".join(tokens)
+
+
+def _interactive(
+    settings,
+    *,
+    provider: str | None,
+    stdin: TextIO,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> int:
+    statuses = ProviderRegistry(settings=settings).list_statuses()
+    provider_ids = ("auto",) + tuple(status.id for status in statuses)
+    selected_provider = provider.strip().lower() if provider else None
+
+    stdout.write("AgentX interactive mode\n")
+    stdout.write("Type /help for commands or /quit to exit.\n")
+
+    if selected_provider is None:
+        stdout.write("\nProviders:\n")
+        stdout.write("  1. auto - route by policy and availability\n")
+        for index, status in enumerate(statuses, start=2):
+            availability = "available" if status.enabled else f"unavailable: {status.reason}"
+            stdout.write(f"  {index}. {status.id} - {status.display_name} ({availability})\n")
+        stdout.write("Select provider [auto]: ")
+        choice = stdin.readline().strip()
+        if choice.isdigit():
+            choice_index = int(choice)
+            if choice_index == 1:
+                selected_provider = "auto"
+            elif 2 <= choice_index <= len(statuses) + 1:
+                selected_provider = statuses[choice_index - 2].id
+        elif choice:
+            selected_provider = choice.lower()
+        else:
+            selected_provider = "auto"
+
+    if selected_provider not in provider_ids:
+        stderr.write(
+            f"agentx: unknown provider '{selected_provider}'. Use /providers to list providers.\n"
+        )
+        return 2
+
+    while True:
+        stdout.write(f"\nagentx[{selected_provider}]> ")
+        line = stdin.readline()
+        if line == "":
+            stdout.write("\n")
+            return 0
+        prompt = line.strip()
+        if not prompt:
+            continue
+        command = prompt.lower()
+        if command in {"/quit", "/exit", ":q"}:
+            return 0
+        if command in {"/help", "help"}:
+            stdout.write(
+                "Commands: /provider [id|auto], /providers, /help, /quit. "
+                "Any other input is treated as a coding task.\n"
+            )
+            continue
+        if command == "/providers":
+            for status in statuses:
+                availability = "available" if status.enabled else f"unavailable: {status.reason}"
+                stdout.write(f"  {status.id}: {availability}\n")
+            continue
+        if command.startswith("/provider"):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) == 1:
+                stdout.write(f"Current provider: {selected_provider}\n")
+                continue
+            requested = parts[1].strip().lower()
+            if requested not in provider_ids:
+                stderr.write(f"agentx: unknown provider '{requested}'.\n")
+                continue
+            selected_provider = requested
+            stdout.write(f"Provider changed to {selected_provider}.\n")
+            continue
+
+        session_id = f"interactive-{uuid.uuid4().hex[:12]}"
+        if selected_provider == "codex":
+            _plan(
+                prompt,
+                "codex",
+                None,
+                session_id,
+                ".",
+                None,
+                (),
+                settings,
+                False,
+                stdout,
+                stderr,
+            )
+        elif selected_provider == "fake-local":
+            _plan(
+                prompt,
+                "fake-local",
+                None,
+                session_id,
+                ".",
+                None,
+                (),
+                settings,
+                False,
+                stdout,
+                stderr,
+            )
+        else:
+            if selected_provider != "auto":
+                stdout.write(
+                    f"{selected_provider} is currently available for routing explanations only.\n"
+                )
+            _route(prompt, "plan", selected_provider, None, settings, False, stdout, stderr)
 
 
 def _route(

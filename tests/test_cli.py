@@ -142,6 +142,78 @@ class CliTests(unittest.TestCase):
         self.assertEqual({"max_cost_usd": None, "max_input_tokens": None, "max_output_tokens": None}, payload["run"]["budget"])
         self.assertEqual("no_eligible_provider", payload["reason"])
 
+    def test_no_arguments_enters_interactive_mode_and_can_quit(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        settings = Settings(
+            paths=AgentXPaths(
+                root=Path("tests") / ".tmp_cli_interactive",
+                settings=Path("tests") / ".tmp_cli_interactive" / "settings.json",
+                sessions=Path("tests") / ".tmp_cli_interactive" / "sessions",
+                memories=Path("tests") / ".tmp_cli_interactive" / "memories",
+                auth=Path("tests") / ".tmp_cli_interactive" / "auth",
+            )
+        )
+        statuses = (
+            ProviderStatus(
+                id="fake-local",
+                display_name="AgentX Fake Local",
+                kind="builtin",
+                enabled=True,
+                reason="available",
+            ),
+        )
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                code = cli.run([], stdout, stderr, io.StringIO("1\n/quit\n"))
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertIn("AgentX interactive mode", stdout.getvalue())
+        self.assertIn("fake-local", stdout.getvalue())
+        self.assertIn("agentx[auto]>", stdout.getvalue())
+
+    def test_interactive_provider_option_runs_selected_codex_prompt(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        settings = Settings(
+            paths=AgentXPaths(
+                root=Path("tests") / ".tmp_cli_interactive_codex",
+                settings=Path("tests") / ".tmp_cli_interactive_codex" / "settings.json",
+                sessions=Path("tests") / ".tmp_cli_interactive_codex" / "sessions",
+                memories=Path("tests") / ".tmp_cli_interactive_codex" / "memories",
+                auth=Path("tests") / ".tmp_cli_interactive_codex" / "auth",
+            )
+        )
+        statuses = (
+            ProviderStatus(
+                id="codex",
+                display_name="Codex CLI",
+                kind="cli",
+                enabled=True,
+                reason="available",
+            ),
+        )
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                with mock.patch("agentx.cli._plan") as plan:
+                    code = cli.run(
+                        ["interactive", "--provider", "codex"],
+                        stdout,
+                        stderr,
+                        io.StringIO("plan this change\n/quit\n"),
+                    )
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual("plan this change", plan.call_args.args[0])
+        self.assertEqual("codex", plan.call_args.args[1])
+        self.assertIn("agentx[codex]>", stdout.getvalue())
+
     def test_route_rejects_invalid_mode(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

@@ -45,6 +45,27 @@ agentx providers list
 agentx plan --fake "plan with the deterministic local adapter"
 ```
 
+Run `agentx` without a subcommand to enter the provider-aware interactive CLI:
+
+```sh
+python -m agentx
+```
+
+AgentX lists configured providers and lets you choose `auto`, `codex`, Claude,
+or another available provider before accepting coding tasks. You can also fix
+the provider for the session:
+
+```sh
+python -m agentx interactive --provider codex
+python -m agentx --provider claude
+```
+
+Inside the session, enter a task at the `agentx[provider]>` prompt. Use
+`/provider auto`, `/providers`, `/help`, or `/quit` to control the session.
+Codex and the deterministic `fake-local` provider run their currently exposed
+plan workflows. Other providers currently return routing explanations until
+their live adapters are exposed through the public CLI.
+
 ## Provider Usage
 
 AgentX can inspect provider availability, explain a route, and run the live
@@ -140,6 +161,7 @@ provider adapters are exposed through the CLI.
 The public CLI currently supports:
 
 - `init`: write first-run settings under the resolved AgentX state root.
+- `interactive` or `shell`: enter a provider-aware interactive task session.
 - `providers list`: inspect configured provider availability.
 - `route`: explain provider and model-tier routing without running a provider.
 - `plan --fake` or `plan --provider fake-local`: run the deterministic offline
