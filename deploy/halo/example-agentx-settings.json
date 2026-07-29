@@ -1,11 +1,12 @@
 {
-  "public_providers": ["codex", "claude"],
+  "public_providers": ["codex", "claude", "kiro"],
   "private_provider": "private-openai-compatible",
   "external_max_classification": "internal",
   "providers": {
     "private-openai-compatible": {
       "endpoint": "http://127.0.0.1:8000/v1",
       "model": "Qwen/Qwen3-14B",
+      "timeout": 900,
       "enabled": true
     }
   }

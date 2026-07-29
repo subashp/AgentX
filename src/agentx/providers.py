@@ -16,6 +16,12 @@ ProviderCheck = Callable[[str], bool]
 
 
 @dataclass(frozen=True)
+class _EndpointCheckResult:
+    endpoint: bool
+    model: bool | None = None
+
+
+@dataclass(frozen=True)
 class ProviderDefinition:
     id: str
     display_name: str
@@ -81,6 +87,7 @@ class ProviderRegistry:
         self._auth_check = auth_check or (lambda check_id: True)
         self._subscription_check = subscription_check or (lambda check_id: True)
         self._endpoint_check = endpoint_check or _default_endpoint_check
+        self._uses_default_endpoint_check = endpoint_check is None
 
     def list_statuses(self) -> tuple[ProviderStatus, ...]:
         return tuple(self._status_for(provider) for provider in self._providers)
@@ -121,7 +128,8 @@ class ProviderRegistry:
                         endpoint=endpoint,
                         checks=checks,
                     )
-                checks["endpoint"] = self._endpoint_check(endpoint)
+                endpoint_result = self._check_endpoint(endpoint, provider_settings.model)
+                checks["endpoint"] = endpoint_result.endpoint
                 if not checks["endpoint"]:
                     return ProviderStatus(
                         id=provider.id,
@@ -133,6 +141,20 @@ class ProviderRegistry:
                         endpoint=endpoint,
                         checks=checks,
                     )
+                if endpoint_result.model is False:
+                    checks["model"] = False
+                    return ProviderStatus(
+                        id=provider.id,
+                        display_name=provider.display_name,
+                        kind=provider.kind,
+                        enabled=False,
+                        reason="model_not_found",
+                        command=command,
+                        endpoint=endpoint,
+                        checks=checks,
+                    )
+                if endpoint_result.model is not None:
+                    checks["model"] = True
                 return self._checked_status(provider, command, endpoint, None, checks)
 
             return ProviderStatus(
@@ -223,6 +245,11 @@ class ProviderRegistry:
             checks=checks,
         )
 
+    def _check_endpoint(self, endpoint: str, model: str) -> _EndpointCheckResult:
+        if self._uses_default_endpoint_check:
+            return _default_endpoint_check(endpoint, model)
+        return _EndpointCheckResult(endpoint=bool(self._endpoint_check(endpoint)))
+
 
 def _configured_endpoint(provider_settings) -> str | None:
     if provider_settings is None:
@@ -230,10 +257,10 @@ def _configured_endpoint(provider_settings) -> str | None:
     return provider_settings.endpoint
 
 
-def _default_endpoint_check(endpoint: str) -> bool:
+def _default_endpoint_check(endpoint: str, model: str | None = None) -> _EndpointCheckResult:
     parsed = urllib.parse.urlsplit(endpoint)
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        return False
+        return _EndpointCheckResult(endpoint=False)
     path = parsed.path.rstrip("/")
     if not path.endswith("/v1"):
         path += "/v1"
@@ -251,5 +278,13 @@ def _default_endpoint_check(endpoint: str) -> bool:
         with urllib.request.urlopen(request, timeout=3.0) as response:
             payload = json.loads(response.read().decode("utf-8"))
     except (OSError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError, urllib.error.URLError):
-        return False
-    return isinstance(payload, dict) and isinstance(payload.get("data"), list)
+        return _EndpointCheckResult(endpoint=False)
+
+    data = payload.get("data") if isinstance(payload, dict) else None
+    if not isinstance(data, list) or not all(
+        isinstance(item, dict) and isinstance(item.get("id"), str) for item in data
+    ):
+        return _EndpointCheckResult(endpoint=False)
+    if model is None:
+        return _EndpointCheckResult(endpoint=True)
+    return _EndpointCheckResult(endpoint=True, model=any(item["id"] == model for item in data))

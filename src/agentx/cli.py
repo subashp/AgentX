@@ -34,7 +34,7 @@ def build_parser() -> argparse.ArgumentParser:
     init = subparsers.add_parser("init", help="initialize AgentX settings")
     init.add_argument(
         "--profile",
-        choices=("agentx", "codex", "private-openai-compatible"),
+        choices=("agentx", "codex", "private-openai-compatible", "halo"),
         default="agentx",
         help="settings profile to write",
     )
@@ -638,26 +638,28 @@ def _settings_for_profile(
             external_max_classification=base.external_max_classification,
             providers={"codex": ProviderSettings(command=codex_command)},
         )
-    if profile == "private-openai-compatible":
+    if profile in {"private-openai-compatible", "halo"}:
         if not endpoint:
             raise ConfigError("private-openai-compatible profile requires --endpoint.")
         if not model:
             raise ConfigError("private-openai-compatible profile requires --model.")
+        providers = dict(base.providers)
+        providers["private-openai-compatible"] = ProviderSettings(
+            endpoint=endpoint,
+            model=model,
+            api_key_env=api_key_env,
+            timeout=timeout,
+        )
         return Settings(
             paths=base.paths,
-            public_providers=(),
+            # Add Qwen without disabling existing CLI integrations. An empty
+            # list intentionally means no provider allow-list.
+            public_providers=base.public_providers,
             private_provider="private-openai-compatible",
             external_max_classification=base.external_max_classification,
-            providers={
-                "private-openai-compatible": ProviderSettings(
-                    endpoint=endpoint,
-                    model=model,
-                    api_key_env=api_key_env,
-                    timeout=timeout,
-                )
-            },
+            providers=providers,
         )
-    raise ConfigError("init profile must be 'agentx', 'codex', or 'private-openai-compatible'.")
+    raise ConfigError("init profile must be 'agentx', 'codex', 'private-openai-compatible', or 'halo'.")
 
 
 def _plan(

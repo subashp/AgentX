@@ -196,6 +196,70 @@ class ProviderRegistryTests(unittest.TestCase):
         request = opener.call_args.args[0]
         self.assertEqual("https://model.example/v1/models", request.full_url)
         self.assertEqual("true", request.get_header("Ngrok-skip-browser-warning"))
+        self.assertEqual({"endpoint": True, "model": True}, statuses[0].checks)
+
+    def test_default_private_endpoint_check_rejects_missing_configured_model(self):
+        registry = ProviderRegistry(
+            [ProviderDefinition("private", "Private", "openai_compatible", None, public=False)],
+            settings=settings(
+                {
+                    "private": ProviderSettings(
+                        endpoint="https://model.example/v1",
+                        model="missing-model",
+                    )
+                }
+            ),
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"data":[{"id":"local-coder"}]}'
+
+        with mock.patch("agentx.providers.urllib.request.urlopen", return_value=response):
+            statuses = registry.list_statuses()
+
+        self.assertFalse(statuses[0].enabled)
+        self.assertEqual("model_not_found", statuses[0].reason)
+        self.assertEqual({"endpoint": True, "model": False}, statuses[0].checks)
+
+    def test_default_private_endpoint_check_rejects_invalid_model_list(self):
+        registry = ProviderRegistry(
+            [ProviderDefinition("private", "Private", "openai_compatible", None, public=False)],
+            settings=settings(
+                {
+                    "private": ProviderSettings(
+                        endpoint="https://model.example/v1",
+                        model="local-coder",
+                    )
+                }
+            ),
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"data":[{"object":"model"}]}'
+
+        with mock.patch("agentx.providers.urllib.request.urlopen", return_value=response):
+            statuses = registry.list_statuses()
+
+        self.assertFalse(statuses[0].enabled)
+        self.assertEqual("disabled_unhealthy", statuses[0].reason)
+        self.assertEqual({"endpoint": False}, statuses[0].checks)
+
+    def test_default_private_endpoint_check_rejects_invalid_endpoint(self):
+        registry = ProviderRegistry(
+            [ProviderDefinition("private", "Private", "openai_compatible", None, public=False)],
+            settings=settings(
+                {
+                    "private": ProviderSettings(
+                        endpoint="not-an-http-endpoint",
+                        model="local-coder",
+                    )
+                }
+            ),
+        )
+
+        statuses = registry.list_statuses()
+
+        self.assertFalse(statuses[0].enabled)
+        self.assertEqual("disabled_unhealthy", statuses[0].reason)
+        self.assertEqual({"endpoint": False}, statuses[0].checks)
 
 
 if __name__ == "__main__":

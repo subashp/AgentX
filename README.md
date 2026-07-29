@@ -21,6 +21,24 @@ clients, and provides a shared machine conversation endpoint separate from
 AgentX's stateless coding-run integration. See [the Halo deployment guide](deploy/halo/README.md) for
 hardware prerequisites, startup, client endpoints, and security constraints.
 
+The Halo-local path does not require ngrok: the Web UI and AgentX can both use
+the loopback gateway on the Halo host. Halo supplies the ROCm, Python, and
+vLLM prerequisites; the checked-in scripts pull the vLLM image and download
+Qwen model artifacts on first launch. Codex, Claude Code, and Kiro CLI are
+optional local integrations. When present, they remain selectable alongside
+the private Qwen provider; when absent, Qwen can be used by itself.
+
+The shortest Halo-local path is:
+
+```sh
+./deploy/halo/setup.sh
+./deploy/halo/start.sh
+agentx
+```
+
+This keeps the Web UI and AgentX on the Halo host. See the deployment guide
+for optional remote access through a manually installed ngrok tunnel.
+
 ## Quickstart
 
 From a source checkout, install the `agentx` console command once:
@@ -141,9 +159,8 @@ access for the plan workflow.
 ### Self-hosted models, such as Qwen3-Coder
 
 Self-hosted models such as the Halo Qwen/vLLM deployment can be used through
-the OpenAI-compatible `/v1` chat endpoint. Configure the endpoint and model
-from inside AgentX. The endpoint may be local or a temporary remote tunnel;
-do not commit a changing ngrok URL to the repository:
+the OpenAI-compatible `/v1` chat endpoint. For Halo-local use, configure the
+loopback gateway; no ngrok tunnel is required:
 
 ```sh
 agentx init \
@@ -154,10 +171,12 @@ agentx init \
   --force
 ```
 
-For a current ngrok tunnel, replace the endpoint with the active tunnel URL.
-Because the free ngrok URL changes after a restart, rerun the same command with
-the new URL. This updates the external settings file and does not modify the
-repository:
+For optional remote AgentX use, replace the endpoint with the active ngrok
+tunnel URL. Because `ngrok http 8000` exposes the whole Halo gateway—including
+the Web UI, session APIs, machine-chat endpoint, and `/v1` API—do not expose it
+to the public internet with real private data until authentication is added.
+The free ngrok URL can change after a restart, so update the external settings
+with the new URL; never commit it to the repository:
 
 ```sh
 agentx init \
@@ -172,7 +191,7 @@ The equivalent settings document, kept outside the source checkout, is:
 
 ```json
 {
-  "public_providers": ["codex", "claude"],
+  "public_providers": ["codex", "claude", "kiro"],
   "private_provider": "private-openai-compatible",
   "external_max_classification": "internal",
   "providers": {
@@ -350,7 +369,7 @@ resolved settings include:
 
 ```json
 {
-  "public_providers": ["codex", "claude"],
+  "public_providers": ["codex", "claude", "kiro"],
   "private_provider": "private-openai-compatible",
   "external_max_classification": "internal",
   "providers": {

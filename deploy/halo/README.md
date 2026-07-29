@@ -1,7 +1,9 @@
 # Halo Qwen/vLLM deployment
 
 This directory deploys a local Qwen model on an AMD Ryzen AI Max+ Halo host
-with ROCm and exposes three client surfaces through one loopback-only gateway.
+with the ROCm, Python, and vLLM runtime preconfigured by the Halo image. It
+exposes three client surfaces through one loopback-only gateway. ngrok is not
+required for the local Web UI or local AgentX workflow.
 
 | Client | Endpoint | Conversation state |
 | --- | --- | --- |
@@ -16,12 +18,13 @@ summary, recent messages, and cross-session user memory.
 
 ## Host prerequisites
 
+- An AMD Halo image with its supported ROCm, Python, and vLLM prerequisites
+  installed.
 - AMD Halo GPU usable through ROCm (`rocminfo` sees `gfx1151`).
 - `/dev/kfd` and `/dev/dri` available to the launching user; that user must be
   in the `render` group.
 - Podman or Docker. The scripts default to `docker`; set
   `CONTAINER_ENGINE=podman` on hosts that expose Podman directly.
-- Python 3.11+ for the web gateway.
 - Roughly 70 GiB free disk for the vLLM container and Qwen3-14B cache.
 
 Run the local host check once after cloning:
@@ -34,37 +37,60 @@ cd AgentX/deploy/halo
 No model weights, Hugging Face token, chat history, container storage, or ngrok
 credentials are committed to this repository.
 
-## Launch
+## Halo-local quickstart
 
-Start the model in one terminal:
+From a fresh checkout, run the idempotent setup command. It validates the
+preconfigured Halo runtime, installs this checkout as the `agentx` command in
+the selected Python environment when needed, and merges the local Qwen
+provider into the external AgentX settings file without removing existing
+Codex, Claude, or Kiro configuration.
 
 ```bash
-cd AgentX/deploy/halo
-./start-qwen3-14b-vllm.sh
+cd AgentX
+./deploy/halo/setup.sh
+```
+
+Start the local model and Web UI with one command:
+
+```bash
+./deploy/halo/start.sh
 ```
 
 The first launch pulls `docker.io/vllm/vllm-openai-rocm:latest` and downloads
 `Qwen/Qwen3-14B` into `~/models/vllm-huggingface`. Set `HF_TOKEN` in your own
 shell if Hugging Face authentication is required; never put it in this repo.
 
-Start the gateway in a second terminal:
+`start.sh` starts the existing vLLM and gateway scripts, waits for
+`/v1/models`, and updates the external AgentX settings with the model ID that
+the gateway advertises. It records logs and process state outside the
+repository. Inspect or stop the services with:
 
 ```bash
-cd AgentX/deploy/halo
-./start-vllm-web-gateway.sh
+./deploy/halo/status.sh
+./deploy/halo/stop.sh
 ```
 
 The model is bound to `127.0.0.1:8001`; the gateway is bound to
-`127.0.0.1:8000`. If ngrok is desired, tunnel only the gateway:
+`127.0.0.1:8000`. Open the local Web UI at
+`http://127.0.0.1:8000/`; no tunnel is needed.
+
+Then use both surfaces locally:
 
 ```bash
-ngrok http 8000
+agentx providers list
+agentx
 ```
+
+The interactive startup lists whichever of Codex, Claude, Kiro, and Qwen are
+available. A missing subscription or CLI does not prevent local Qwen use, and
+the setup command does not replace existing provider configuration. Use
+`/provider` or `--provider` to choose explicitly; use `auto` to let AgentX
+route among the providers that are available and policy-eligible.
 
 The 4B smoke-test profile is also available:
 
 ```bash
-./start-qwen3-4b-vllm.sh
+./deploy/halo/start-qwen3-4b-vllm.sh
 ```
 
 ## Clients
@@ -95,23 +121,59 @@ replace the request-supplied `user_id` before public use.
 
 ## AgentX integration
 
-AgentX can use the gateway's stateless `/v1` endpoint directly. Configure the
-provider profile from the checkout or point it at the active ngrok tunnel:
+AgentX uses the gateway's stateless `/v1` endpoint directly. For the
+Halo-local workflow, use `http://127.0.0.1:8000/v1` and keep the Web UI and
+AgentX on the Halo host. The persistent `/api/machine-chat` endpoint remains a
+separate chat surface; AgentX uses `/v1/chat/completions` so each coding run
+has its own stateless request and local audit artifacts.
+
+The checked-in example keeps the settings outside the repository and includes
+all three optional CLI providers alongside Qwen:
 
 ```bash
-cp example-agentx-settings.json /path/outside/the/repository/agentx-settings.json
-export AGENTX_SETTINGS=/path/outside/the/repository/agentx-settings.json
+mkdir -p "$HOME/.config/agentx"
+cp deploy/halo/example-agentx-settings.json \
+  "$HOME/.config/agentx/halo-settings.json"
+export AGENTX_SETTINGS="$HOME/.config/agentx/halo-settings.json"
 agentx providers list
-agentx plan --provider private-openai-compatible "review the current task"
+agentx --provider private-openai-compatible
 ```
 
-For a tunnel that changes after restart, configure `--endpoint-env
-AGENTX_QWEN_ENDPOINT` once and update that environment variable instead of
-rewriting the settings file.
+Provider availability is independent: a user may have Codex, Claude, Kiro,
+any combination of them, or none. AgentX lists unavailable integrations and
+continues to offer the configured local Qwen provider.
 
-The persistent `/api/machine-chat` endpoint remains a separate chat surface;
-AgentX uses `/v1/chat/completions` so each coding run has its own stateless
-request and local audit artifacts.
+### Optional remote AgentX through ngrok
+
+For a remote AgentX client, install and authenticate ngrok using the [official
+ngrok download and setup instructions](https://ngrok.com/), then run this on
+the Halo host:
+
+```bash
+ngrok http 8000
+```
+
+This exposes the entire gateway on port `8000`, including the Web UI, session
+APIs, machine-chat endpoint, and `/v1` API. It is not an API-only tunnel and
+the current gateway has no user authentication. Do not expose it to the public
+internet with real conversations or private data until an authentication
+boundary is configured. The local Halo workflow does not require ngrok.
+
+Use the active tunnel URL, including `/v1`, when configuring AgentX on the
+remote machine:
+
+```bash
+agentx init \
+  --profile private-openai-compatible \
+  --endpoint https://<current-tunnel>.ngrok-free.app/v1 \
+  --model Qwen/Qwen3-14B \
+  --timeout 900 \
+  --force
+```
+
+The free ngrok URL can change after a restart, so update the external AgentX
+settings with the current URL. Do not commit the URL, credentials, or runtime
+settings to this repository.
 
 ## Operational notes
 

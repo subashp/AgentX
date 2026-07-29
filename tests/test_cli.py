@@ -186,6 +186,54 @@ class CliTests(unittest.TestCase):
             if root.exists():
                 shutil.rmtree(root)
 
+    def test_init_private_profile_preserves_existing_provider_configuration(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_init_private_merge"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                ),
+                public_providers=("codex", "claude"),
+                providers={"codex": ProviderSettings(command="codex")},
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                code = cli.run(
+                    [
+                        "init",
+                        "--profile",
+                        "halo",
+                        "--endpoint",
+                        "http://127.0.0.1:8000/v1",
+                        "--model",
+                        "Qwen/Qwen3-14B",
+                        "--force",
+                    ],
+                    stdout,
+                    stderr,
+                )
+
+            self.assertEqual(0, code)
+            written = json.loads((root / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual(["codex", "claude"], written["public_providers"])
+            self.assertEqual("codex", written["providers"]["codex"]["command"])
+            self.assertEqual(
+                "Qwen/Qwen3-14B",
+                written["providers"]["private-openai-compatible"]["model"],
+            )
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
     def test_config_path_outputs_json(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
