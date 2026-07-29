@@ -237,7 +237,7 @@ class OpenAICompatibleAdapter:
                 status_code=exc.status_code,
             )
 
-        assistant_content = _extract_assistant_content(response)
+        assistant_content, thinking = _extract_assistant_message(response)
         if assistant_content is None:
             return self._failure_result(
                 model_id=model_id,
@@ -267,8 +267,11 @@ class OpenAICompatibleAdapter:
             "status": "success",
             "outcome": "openai_compatible_completed",
             "summary": assistant_content,
+            "response": assistant_content,
             "patch_applied": False,
         }
+        if thinking:
+            outcome["thinking"] = thinking
         return AdapterResult(
             provider_id=self.provider_id,
             model_id=model_id,
@@ -459,28 +462,56 @@ def _normalize_message(value: Mapping[str, str]) -> dict[str, str]:
     return {"role": role, "content": content}
 
 
-def _extract_assistant_content(response: Mapping[str, object]) -> str | None:
+def _extract_assistant_message(response: Mapping[str, object]) -> tuple[str | None, str | None]:
     choices = response.get("choices")
     if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices:
-        return None
+        return None, None
     first = choices[0]
     if not isinstance(first, Mapping):
-        return None
+        return None, None
     message = first.get("message")
     if not isinstance(message, Mapping):
-        return None
-    content = message.get("content")
-    if isinstance(content, str):
-        normalized = content.strip()
+        return None, None
+
+    thinking = _extract_text_value(
+        message.get("reasoning_content")
+        or message.get("reasoning")
+        or message.get("thinking")
+        or first.get("reasoning_content")
+    )
+    content = _extract_text_value(message.get("content"))
+    if content is None:
+        return None, thinking
+    content, inline_thinking = _split_inline_thinking(content)
+    if thinking is None:
+        thinking = inline_thinking
+    return content, thinking
+
+
+def _extract_text_value(value: object) -> str | None:
+    if isinstance(value, str):
+        normalized = value.strip()
         return normalized or None
-    if isinstance(content, Sequence) and not isinstance(content, (str, bytes)):
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
         parts: list[str] = []
-        for item in content:
+        for item in value:
             if isinstance(item, Mapping) and isinstance(item.get("text"), str):
                 parts.append(item["text"])
         normalized = "".join(parts).strip()
         return normalized or None
     return None
+
+
+def _split_inline_thinking(content: str) -> tuple[str, str | None]:
+    opening = content.find("<think>")
+    if opening < 0:
+        return content, None
+    closing = content.find("</think>", opening + len("<think>"))
+    if closing < 0:
+        return content, None
+    thinking = content[opening + len("<think>") : closing].strip()
+    response = (content[:opening] + content[closing + len("</think>") :]).strip()
+    return response or None, thinking or None
 
 
 def _normalize_usage(value: object) -> Mapping[str, object] | None:

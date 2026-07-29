@@ -810,7 +810,10 @@ def _plan(
         result.as_dict(),
         json_output,
         stdout,
-        text_formatter=_format_plan,
+        text_formatter=lambda payload: _format_plan(
+            payload,
+            color=_supports_color(stdout),
+        ),
     )
     return code
 
@@ -895,7 +898,7 @@ def _format_fake_run(payload: dict[str, object]) -> str:
     return f"wrote fake run artifacts to {payload['root']}\n"
 
 
-def _format_plan(payload: dict[str, object]) -> str:
+def _format_plan(payload: dict[str, object], *, color: bool = False) -> str:
     route = payload["route"]
     result = payload.get("result", {})
     lines = [
@@ -919,12 +922,37 @@ def _format_plan(payload: dict[str, object]) -> str:
             if stderr_text:
                 label = "provider error" if result.get("status") != "success" else "provider stderr"
                 lines.extend(("", f"{label}:", stderr_text))
+        outcome = result.get("outcome", {})
+        if (
+            result.get("provider_id") == "private-openai-compatible"
+            and result.get("status") == "success"
+            and isinstance(outcome, dict)
+        ):
+            thinking = outcome.get("thinking")
+            response = outcome.get("response") or outcome.get("summary")
+            if isinstance(thinking, str) and thinking.strip():
+                lines.extend(("", _render_thinking(thinking.strip(), color=color)))
+            if isinstance(response, str) and response.strip():
+                lines.extend(("", "Assistant:", response.strip()))
         if result.get("status") != "success":
-            outcome = result.get("outcome", {})
             summary = outcome.get("summary") if isinstance(outcome, dict) else None
             if summary:
                 lines.extend(("", f"provider status: {summary}"))
     return "\n".join(lines) + "\n"
+
+
+def _render_thinking(thinking: str, *, color: bool) -> str:
+    rendered = f"Thinking:\n{thinking}"
+    if not color:
+        return rendered
+    return f"\x1b[90m{rendered}\x1b[0m"
+
+
+def _supports_color(stream: TextIO) -> bool:
+    if os.environ.get("NO_COLOR") is not None:
+        return False
+    isatty = getattr(stream, "isatty", None)
+    return bool(callable(isatty) and isatty())
 
 
 def _format_execute(payload: dict[str, object]) -> str:

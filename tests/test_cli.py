@@ -378,6 +378,29 @@ class CliTests(unittest.TestCase):
         self.assertIn("provider stderr:", rendered)
         self.assertIn("Codex warning", rendered)
 
+    def test_plan_formatter_surfaces_private_response_and_dimmed_thinking(self):
+        rendered = cli._format_plan(
+            {
+                "root": "state/session",
+                "route": {"explanation": "Selected provider 'private-openai-compatible'."},
+                "result": {
+                    "provider_id": "private-openai-compatible",
+                    "status": "success",
+                    "outcome": {
+                        "response": "Hello from Qwen.",
+                        "thinking": "The user offered a greeting.",
+                    },
+                },
+            },
+            color=True,
+        )
+
+        self.assertIn("Assistant:\nHello from Qwen.", rendered)
+        self.assertIn(
+            "\x1b[90mThinking:\nThe user offered a greeting.\x1b[0m",
+            rendered,
+        )
+
     def test_plan_formatter_surfaces_provider_failure(self):
         rendered = cli._format_plan(
             {

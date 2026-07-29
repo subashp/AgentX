@@ -130,6 +130,27 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertEqual("success", result.status)
         self.assertNotIn("Authorization", self.server.requests[0]["headers"])
 
+    def test_success_preserves_reasoning_content_separately_from_response(self):
+        self.server.response_body["choices"][0]["message"] = {
+            "role": "assistant",
+            "reasoning_content": "The greeting is simple and needs a direct answer.",
+            "content": "Hello from Qwen.",
+        }
+        adapter = OpenAICompatibleAdapter(base_url=self.base_url, model="local-coder")
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(prompt="Hello", provider="private-openai-compatible")
+            )
+        )
+
+        self.assertEqual("Hello from Qwen.", result.outcome["summary"])
+        self.assertEqual("Hello from Qwen.", result.outcome["response"])
+        self.assertEqual(
+            "The greeting is simple and needs a direct answer.",
+            result.outcome["thinking"],
+        )
+
     def test_context_contents_are_bounded_to_policy_included_paths(self):
         context_root = self.fixture_root / "workspace"
         context_root.mkdir()
