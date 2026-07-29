@@ -6,6 +6,7 @@ build-backend = "setuptools.build_meta"
 name = "agentx"
 version = "0.1.0"
 description = "Provider-neutral command-line gateway for agentic coding"
+license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
