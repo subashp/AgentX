@@ -432,6 +432,23 @@ class CliTests(unittest.TestCase):
             rendered,
         )
 
+    def test_interactive_plan_formatter_hides_post_run_metadata(self):
+        rendered = cli._format_plan(
+            {
+                "root": "state/session",
+                "route": {"explanation": "Selected provider 'private-openai-compatible'."},
+                "result": {
+                    "provider_id": "private-openai-compatible",
+                    "status": "success",
+                    "outcome": {"streamed": True, "response": "Answer"},
+                },
+            },
+            show_metadata=False,
+        )
+
+        self.assertNotIn("wrote plan artifacts", rendered)
+        self.assertNotIn("Selected provider", rendered)
+
     def test_cli_stream_renderer_separates_thinking_and_response(self):
         stdout = io.StringIO()
         renderer = cli._CliStreamRenderer(stdout, color=True)

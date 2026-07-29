@@ -432,6 +432,7 @@ def _interactive(
                 False,
                 stdout,
                 stderr,
+                interactive_output=True,
             )
         elif selected_provider == "fake-local":
             _plan(
@@ -446,6 +447,7 @@ def _interactive(
                 False,
                 stdout,
                 stderr,
+                interactive_output=True,
             )
         else:
             if selected_provider != "auto":
@@ -504,6 +506,8 @@ def _route(
     json_output: bool,
     stdout: TextIO,
     stderr: TextIO,
+    *,
+    interactive_output: bool = False,
 ) -> int:
     statuses = ProviderRegistry(settings=settings).list_statuses()
     try:
@@ -824,6 +828,7 @@ def _plan(
         text_formatter=lambda payload: _format_plan(
             payload,
             color=_supports_color(stdout),
+            show_metadata=not interactive_output,
         ),
     )
     return code
@@ -909,13 +914,20 @@ def _format_fake_run(payload: dict[str, object]) -> str:
     return f"wrote fake run artifacts to {payload['root']}\n"
 
 
-def _format_plan(payload: dict[str, object], *, color: bool = False) -> str:
+def _format_plan(
+    payload: dict[str, object],
+    *,
+    color: bool = False,
+    show_metadata: bool = True,
+) -> str:
     route = payload["route"]
     result = payload.get("result", {})
-    lines = [
-        f"wrote plan artifacts to {payload['root']}\n"
-        f"{route['explanation']}"
-    ]
+    lines = []
+    if show_metadata:
+        lines.append(
+            f"wrote plan artifacts to {payload['root']}\n"
+            f"{route['explanation']}"
+        )
     if isinstance(result, dict):
         output_event = next(
             (
