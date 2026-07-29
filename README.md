@@ -39,37 +39,33 @@ agentx
 This keeps the Web UI and AgentX on the Halo host. See the deployment guide
 for optional remote access through a manually installed ngrok tunnel.
 
-## Quickstart
+## AgentX quickstart
 
-From a source checkout, install the `agentx` console command once:
+For a general AgentX checkout, install the `agentx` console command once:
 
 ```sh
 python -m pip install --editable .
 ```
 
-The command is then available on Windows, macOS, and Linux:
+Then inspect the available providers and enter the interactive workflow:
 
 ```sh
-agentx init
+agentx providers list
+agentx
+```
+
+Use subcommands when you want a non-interactive workflow:
+
+```sh
 agentx providers list
 agentx route "summarize the routing module"
 agentx plan --context README.md "plan a documentation cleanup"
-agentx init --profile codex --force
-agentx plan --provider codex --context README.md "plan a documentation cleanup"
-agentx execute --fake --allowed-patch README.md "try an offline execute run"
 agentx config path
-agentx config show
 ```
 
-Use `--json` before the command for machine-readable output:
-
-```sh
-agentx --json route "summarize the routing module"
-agentx --json config path
-```
-
-`python -m agentx` remains available as a Python-module fallback, but it is not
-the primary user-facing invocation.
+Use `--json` before a subcommand for machine-readable output. The module form
+`python -m agentx` remains a fallback when the `agentx` console script is not on
+your `PATH`; the documented interface is the `agentx` command.
 
 Run `agentx` without a subcommand to enter the provider-aware interactive CLI:
 
@@ -156,58 +152,34 @@ agentx plan --provider kiro --context README.md \
 AgentX invokes Kiro's non-interactive chat mode with read-only filesystem
 access for the plan workflow.
 
-### Self-hosted models, such as Qwen3-Coder
+### Self-hosted models
 
-Self-hosted models such as the Halo Qwen/vLLM deployment can be used through
-the OpenAI-compatible `/v1` chat endpoint. For Halo-local use, configure the
-loopback gateway; no ngrok tunnel is required:
+For the AMD Halo deployment, use the [Halo deployment guide](deploy/halo/README.md).
+It configures the local Qwen provider automatically and keeps the Web UI and
+AgentX on the same machine. No ngrok tunnel is needed for that workflow.
 
-```sh
-agentx init \
-  --profile private-openai-compatible \
-  --endpoint http://127.0.0.1:8000/v1 \
-  --model Qwen/Qwen3-14B \
-  --timeout 900 \
-  --force
-```
-
-For optional remote AgentX use, replace the endpoint with the active ngrok
-tunnel URL. Because `ngrok http 8000` exposes the whole Halo gateway—including
-the Web UI, session APIs, machine-chat endpoint, and `/v1` API—do not expose it
-to the public internet with real private data until authentication is added.
-The free ngrok URL can change after a restart, so update the external settings
-with the new URL; never commit it to the repository:
+For another OpenAI-compatible endpoint, configure the endpoint and model in
+the external AgentX settings file:
 
 ```sh
 agentx init \
   --profile private-openai-compatible \
-  --endpoint https://<current-tunnel>.ngrok-free.app/v1 \
-  --model Qwen/Qwen3-14B \
+  --endpoint https://model.example/v1 \
+  --model <model-id> \
   --timeout 900 \
   --force
 ```
 
-The equivalent settings document, kept outside the source checkout, is:
+For a remote Halo endpoint, use the active ngrok URL in place of
+`https://model.example/v1`. Install and authenticate ngrok from its [official
+setup page](https://ngrok.com/), then run `ngrok http 8000` on Halo. This
+exposes the entire gateway, including the Web UI, session APIs, machine-chat
+endpoint, and `/v1` API—so do not expose it to the public internet with real
+private data until authentication is added. Free ngrok URLs can change after a
+restart; keep the updated endpoint only in external settings.
 
-```json
-{
-  "public_providers": ["codex", "claude", "kiro"],
-  "private_provider": "private-openai-compatible",
-  "external_max_classification": "internal",
-  "providers": {
-    "private-openai-compatible": {
-      "endpoint": "http://127.0.0.1:8000/v1",
-      "model": "Qwen/Qwen3-14B",
-      "timeout": 900,
-      "enabled": true
-    }
-  }
-}
-```
-
-Keep this settings file at the path reported by `agentx config path`. If you
-choose a different path, set `AGENTX_SETTINGS` using the environment-variable
-syntax of your shell. Then inspect the endpoint and policy route:
+The settings file is outside the repository. Inspect its location with
+`agentx config path`, then verify the provider and route:
 
 ```sh
 agentx providers list
@@ -216,11 +188,11 @@ agentx plan --provider private-openai-compatible \
 agentx --provider private-openai-compatible
 ```
 
-The endpoint must already be running; AgentX does not provision model weights,
-start a Qwen3-Coder server, or manage cloud compute. If the endpoint requires
-authentication, configure only the name of an environment variable with
-`--api-key-env`; the secret itself is read at runtime and is not written to
-settings or run artifacts:
+The endpoint must already be running; AgentX does not provision arbitrary model
+weights, start arbitrary model servers, or manage cloud compute. If an
+OpenAI-compatible endpoint requires authentication, configure only the name of
+an environment variable with `--api-key-env`; the secret itself is read at
+runtime and is not written to settings or run artifacts:
 
 ```sh
 agentx init \
