@@ -12,6 +12,15 @@ AgentX is built so provider choice stays policy-driven rather than hard-coded to
 one commercial backend. Public CLIs, private model endpoints, and future compute
 backends are modeled as adapters behind the same routing and artifact contracts.
 
+## Halo local-model deployment
+
+The repository includes a reproducible AMD Halo/ROCm vLLM deployment under
+[`deploy/halo`](deploy/halo/). It launches Qwen3-14B locally, provides a
+persistent browser chat UI, proxies the OpenAI-compatible API for external
+clients, and reserves a shared machine conversation endpoint for future AgentX
+CLI integration. See [the Halo deployment guide](deploy/halo/README.md) for
+hardware prerequisites, startup, client endpoints, and security constraints.
+
 ## Quickstart
 
 From a source checkout, make `src` importable first. You can do that with an
