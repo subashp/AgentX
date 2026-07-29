@@ -506,8 +506,6 @@ def _route(
     json_output: bool,
     stdout: TextIO,
     stderr: TextIO,
-    *,
-    interactive_output: bool = False,
 ) -> int:
     statuses = ProviderRegistry(settings=settings).list_statuses()
     try:
@@ -674,6 +672,8 @@ def _plan(
     json_output: bool,
     stdout: TextIO,
     stderr: TextIO,
+    *,
+    interactive_output: bool = False,
 ) -> int:
     try:
         if provider == "fake-local":

@@ -351,6 +351,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("", stderr.getvalue())
         self.assertEqual(["codex", "claude"], [call.args[1] for call in plan.call_args_list])
+        self.assertTrue(all(call.kwargs["interactive_output"] for call in plan.call_args_list))
         self.assertIn("Warning: custom model provider is unavailable", stdout.getvalue())
         self.assertIn("External settings file:", stdout.getvalue())
         self.assertIn("agentx[auto]>", stdout.getvalue())
