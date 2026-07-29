@@ -75,10 +75,11 @@ Codex, Claude Code, Kiro CLI, configured OpenAI-compatible endpoints, and the
 deterministic `fake-local` provider use the same read-only plan boundary and
 local AgentX audit artifacts.
 
-For the private OpenAI-compatible provider, AgentX prints the assistant's
-response after the run. If the endpoint returns a separate reasoning/thinking
-field, it is shown in dim grey terminal text before the response. `/quit` is
-the interactive exit command.
+For the private OpenAI-compatible provider, AgentX streams the assistant's
+response as it arrives. If the endpoint returns a separate reasoning/thinking
+field, it is shown in dim grey terminal text before the response. The complete
+response and reasoning are still saved in the run artifacts. `/quit` is the
+interactive exit command.
 
 If the private model endpoint is missing, AgentX prints a startup warning with
 the external settings-file path and an initialization command. The default

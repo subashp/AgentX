@@ -757,7 +757,7 @@ def _plan(
             )
             if provider_settings is None or not endpoint:
                 stderr.write(
-                    f"agentx: provider '{provider}' requires an endpoint or endpoint environment variable.\n"
+                    f"agentx: provider '{provider}' requires an endpoint in the external settings file.\n"
                 )
                 return 2
             if not provider_settings.model:
@@ -777,6 +777,15 @@ def _plan(
                 context_root=(
                     SessionStore(settings.paths).path_for_session(session_id) / "workspace"
                 ).resolve(),
+                stream=not json_output,
+                stream_callback=(
+                    _CliStreamRenderer(
+                        stdout,
+                        color=_supports_color(stdout),
+                    )
+                    if not json_output
+                    else None
+                ),
             )
             scoped_source_root = Path(source_root)
 
@@ -929,6 +938,7 @@ def _format_plan(payload: dict[str, object], *, color: bool = False) -> str:
             result.get("provider_id") == "private-openai-compatible"
             and result.get("status") == "success"
             and isinstance(outcome, dict)
+            and not outcome.get("streamed", False)
         ):
             thinking = outcome.get("thinking")
             response = outcome.get("response") or outcome.get("summary")
@@ -955,6 +965,39 @@ def _supports_color(stream: TextIO) -> bool:
         return False
     isatty = getattr(stream, "isatty", None)
     return bool(callable(isatty) and isatty())
+
+
+class _CliStreamRenderer:
+    def __init__(self, stdout: TextIO, *, color: bool) -> None:
+        self.stdout = stdout
+        self.color = color
+        self.section: str | None = None
+
+    def __call__(self, kind: str, value: str) -> None:
+        if kind == "thinking":
+            if self.section != "thinking":
+                if self.section is not None:
+                    self.stdout.write("\n")
+                prefix = "\x1b[90m" if self.color else ""
+                self.stdout.write(f"{prefix}Thinking:\n")
+                self.section = "thinking"
+            self.stdout.write(value)
+        elif kind == "content":
+            if self.section != "content":
+                if self.section == "thinking":
+                    self.stdout.write("\x1b[0m" if self.color else "")
+                    self.stdout.write("\n")
+                self.stdout.write("Assistant:\n")
+                self.section = "content"
+            self.stdout.write(value)
+        elif kind in {"complete", "error"}:
+            if self.section is not None:
+                if self.section == "thinking" and self.color:
+                    self.stdout.write("\x1b[0m")
+                self.stdout.write("\n")
+                self.stdout.flush()
+                self.section = None
+        self.stdout.flush()
 
 
 def _format_execute(payload: dict[str, object]) -> str:

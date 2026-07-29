@@ -8,7 +8,7 @@ import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from .adapters import (
     AdapterError,
@@ -71,12 +71,13 @@ class OpenAICompatibleChatClient:
         messages: Sequence[Mapping[str, str]],
         *,
         model: str | None = None,
+        stream: bool = False,
     ) -> dict[str, object]:
         normalized_model = self.model if model is None else _normalize_non_empty_string(model, "model")
         return {
             "model": normalized_model,
             "messages": [_normalize_message(message) for message in messages],
-            "stream": False,
+            "stream": stream,
         }
 
     def create_chat_completion(
@@ -158,6 +159,58 @@ class OpenAICompatibleChatClient:
             )
         return dict(payload)
 
+    def stream_chat_completion(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        model: str | None = None,
+    ) -> Iterator[Mapping[str, object]]:
+        payload = self.build_payload(messages, model=model, stream=True)
+        body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+        headers = {
+            "Accept": "text/event-stream",
+            "Content-Type": "application/json",
+            "Cache-Control": "no-cache",
+            "User-Agent": "agentx-openai-compatible/0.1",
+            "ngrok-skip-browser-warning": "true",
+        }
+        if self.api_key is not None:
+            headers["Authorization"] = "Bearer " + self.api_key
+
+        request = urllib.request.Request(
+            self.chat_completions_url,
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+        try:
+            with self.opener(request, timeout=self.timeout) as response:
+                yield from _iter_sse_json(response)
+        except urllib.error.HTTPError as exc:
+            raise OpenAICompatibleClientError(
+                "http_error",
+                f"OpenAI-compatible endpoint returned HTTP {exc.code}.",
+                status_code=exc.code,
+            ) from exc
+        except (TimeoutError, socket.timeout) as exc:
+            raise OpenAICompatibleClientError(
+                "timeout",
+                f"OpenAI-compatible endpoint timed out after {self.timeout} seconds.",
+            ) from exc
+        except OpenAICompatibleClientError:
+            raise
+        except urllib.error.URLError as exc:
+            reason = _safe_url_error_reason(exc)
+            raise OpenAICompatibleClientError(
+                "url_error",
+                f"OpenAI-compatible endpoint request failed: {reason}.",
+            ) from exc
+        except OSError as exc:
+            raise OpenAICompatibleClientError(
+                "connection_error",
+                f"OpenAI-compatible endpoint request failed: {type(exc).__name__}.",
+            ) from exc
+
 
 class OpenAICompatibleAdapter:
     """ProviderAdapter for local or private-cloud OpenAI-compatible endpoints."""
@@ -172,8 +225,16 @@ class OpenAICompatibleAdapter:
         provider_id: str = DEFAULT_PROVIDER_ID,
         context_root: str | Path | None = None,
         client: OpenAICompatibleChatClient | None = None,
+        stream: bool = False,
+        stream_callback: Callable[[str, str], None] | None = None,
     ) -> None:
         self.provider_id = _normalize_non_empty_string(provider_id, "provider_id")
+        if not isinstance(stream, bool):
+            raise AdapterError("stream must be a boolean.")
+        if stream_callback is not None and not callable(stream_callback):
+            raise AdapterError("stream_callback must be callable or None.")
+        self.stream = stream
+        self.stream_callback = stream_callback
         if context_root is not None and not isinstance(context_root, (str, Path)):
             raise AdapterError("context_root must be a string, Path, or None.")
         self.context_root = None if context_root is None else Path(context_root)
@@ -226,8 +287,18 @@ class OpenAICompatibleAdapter:
         )
 
         try:
-            response = self.client.create_chat_completion(messages, model=model_id)
+            if self.stream:
+                assistant_content, thinking, usage = self._execute_stream(
+                    messages,
+                    model_id=model_id,
+                )
+                response = None
+            else:
+                response = self.client.create_chat_completion(messages, model=model_id)
+                assistant_content, thinking = _extract_assistant_message(response)
+                usage = _normalize_usage(response.get("usage"))
         except OpenAICompatibleClientError as exc:
+            self._notify_stream("error", "")
             return self._failure_result(
                 model_id=model_id,
                 model_tier=model_tier,
@@ -237,8 +308,8 @@ class OpenAICompatibleAdapter:
                 status_code=exc.status_code,
             )
 
-        assistant_content, thinking = _extract_assistant_message(response)
         if assistant_content is None:
+            self._notify_stream("error", "")
             return self._failure_result(
                 model_id=model_id,
                 model_tier=model_tier,
@@ -248,13 +319,13 @@ class OpenAICompatibleAdapter:
                 status_code=None,
             )
 
-        usage = _normalize_usage(response.get("usage"))
+        self._notify_stream("complete", "")
         transcript_events = transcript_prefix + (
             {
                 "sequence": 3,
                 "event": "response_received",
                 "status": "success",
-                "choice_count": _choice_count(response),
+                "choice_count": 1 if self.stream else _choice_count(response),
                 "usage_present": usage is not None,
             },
             {
@@ -268,6 +339,7 @@ class OpenAICompatibleAdapter:
             "outcome": "openai_compatible_completed",
             "summary": assistant_content,
             "response": assistant_content,
+            "streamed": self.stream,
             "patch_applied": False,
         }
         if thinking:
@@ -282,6 +354,42 @@ class OpenAICompatibleAdapter:
             outcome=outcome,
             patch="",
         )
+
+    def _execute_stream(
+        self,
+        messages: Sequence[Mapping[str, str]],
+        *,
+        model_id: str,
+    ) -> tuple[str | None, str | None, Mapping[str, object] | None]:
+        accumulator = _StreamingAssistantAccumulator(self._notify_stream)
+        usage: Mapping[str, object] | None = None
+        for event in self.client.stream_chat_completion(messages, model=model_id):
+            event_usage = _normalize_usage(event.get("usage"))
+            if event_usage is not None:
+                usage = event_usage
+            choices = event.get("choices")
+            if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices:
+                continue
+            first = choices[0]
+            if not isinstance(first, Mapping):
+                continue
+            delta = first.get("delta") or first.get("message")
+            if not isinstance(delta, Mapping):
+                continue
+            accumulator.feed_reasoning(
+                _extract_stream_text_value(
+                    delta.get("reasoning_content")
+                    or delta.get("reasoning")
+                    or delta.get("thinking")
+                )
+            )
+            accumulator.feed_content(_extract_stream_text_value(delta.get("content")))
+        accumulator.finish()
+        return accumulator.response, accumulator.thinking, usage
+
+    def _notify_stream(self, kind: str, value: str) -> None:
+        if self.stream_callback is not None:
+            self.stream_callback(kind, value)
 
     def _failure_result(
         self,
@@ -502,6 +610,19 @@ def _extract_text_value(value: object) -> str | None:
     return None
 
 
+def _extract_stream_text_value(value: object) -> str | None:
+    if isinstance(value, str):
+        return value or None
+    if isinstance(value, Sequence) and not isinstance(value, (str, bytes)):
+        parts: list[str] = []
+        for item in value:
+            if isinstance(item, Mapping) and isinstance(item.get("text"), str):
+                parts.append(item["text"])
+        value = "".join(parts)
+        return value or None
+    return None
+
+
 def _split_inline_thinking(content: str) -> tuple[str, str | None]:
     opening = content.find("<think>")
     if opening < 0:
@@ -512,6 +633,143 @@ def _split_inline_thinking(content: str) -> tuple[str, str | None]:
     thinking = content[opening + len("<think>") : closing].strip()
     response = (content[:opening] + content[closing + len("</think>") :]).strip()
     return response or None, thinking or None
+
+
+def _iter_sse_json(response: Any) -> Iterator[Mapping[str, object]]:
+    data_lines: list[str] = []
+    for raw_line in response:
+        if isinstance(raw_line, bytes):
+            try:
+                line = raw_line.decode("utf-8")
+            except UnicodeDecodeError as exc:
+                raise OpenAICompatibleClientError(
+                    "malformed_response",
+                    "OpenAI-compatible stream returned non-UTF-8 data.",
+                ) from exc
+        elif isinstance(raw_line, str):
+            line = raw_line
+        else:
+            raise OpenAICompatibleClientError(
+                "malformed_stream",
+                "OpenAI-compatible stream returned an invalid line.",
+            )
+        line = line.rstrip("\r\n")
+        if not line:
+            payload, done = _decode_sse_event(data_lines)
+            data_lines = []
+            if done:
+                return
+            if payload is not None:
+                yield payload
+            continue
+        if line.startswith(":"):
+            continue
+        if line.startswith("data:"):
+            data_lines.append(line[5:].lstrip(" "))
+
+    payload, done = _decode_sse_event(data_lines)
+    if not done and payload is not None:
+        yield payload
+
+
+def _decode_sse_event(data_lines: Sequence[str]) -> tuple[Mapping[str, object] | None, bool]:
+    if not data_lines:
+        return None, False
+    raw_payload = "\n".join(data_lines).strip()
+    if raw_payload == "[DONE]":
+        return None, True
+    try:
+        payload = json.loads(raw_payload)
+    except json.JSONDecodeError as exc:
+        raise OpenAICompatibleClientError(
+            "malformed_stream",
+            "OpenAI-compatible endpoint returned malformed SSE JSON.",
+        ) from exc
+    if not isinstance(payload, Mapping):
+        raise OpenAICompatibleClientError(
+            "malformed_stream",
+            "OpenAI-compatible stream events must be JSON objects.",
+        )
+    return dict(payload), False
+
+
+class _StreamingAssistantAccumulator:
+    _OPEN_TAG = "<think>"
+    _CLOSE_TAG = "</think>"
+
+    def __init__(self, callback: Callable[[str, str], None]) -> None:
+        self._callback = callback
+        self._pending = ""
+        self._inline_state = "undecided"
+        self._response_parts: list[str] = []
+        self._thinking_parts: list[str] = []
+
+    @property
+    def response(self) -> str | None:
+        value = "".join(self._response_parts).strip()
+        return value or None
+
+    @property
+    def thinking(self) -> str | None:
+        value = "".join(self._thinking_parts).strip()
+        return value or None
+
+    def feed_reasoning(self, value: str | None) -> None:
+        if value:
+            self._emit_thinking(value)
+
+    def feed_content(self, value: str | None) -> None:
+        if value:
+            self._pending += value
+            self._drain()
+
+    def finish(self) -> None:
+        if self._pending:
+            if self._inline_state == "thinking":
+                self._emit_thinking(self._pending)
+            else:
+                self._emit_response(self._pending)
+            self._pending = ""
+
+    def _drain(self) -> None:
+        while self._pending:
+            if self._inline_state == "response":
+                self._emit_response(self._pending)
+                self._pending = ""
+                return
+            if self._inline_state == "undecided":
+                opening = self._pending.find(self._OPEN_TAG)
+                if opening >= 0:
+                    if opening:
+                        self._emit_response(self._pending[:opening])
+                    self._pending = self._pending[opening + len(self._OPEN_TAG) :]
+                    self._inline_state = "thinking"
+                    continue
+                safe_length = max(0, len(self._pending) - len(self._OPEN_TAG) + 1)
+                if safe_length:
+                    self._emit_response(self._pending[:safe_length])
+                    self._pending = self._pending[safe_length:]
+                return
+            closing = self._pending.find(self._CLOSE_TAG)
+            if closing >= 0:
+                if closing:
+                    self._emit_thinking(self._pending[:closing])
+                self._pending = self._pending[closing + len(self._CLOSE_TAG) :]
+                self._inline_state = "response"
+                continue
+            safe_length = max(0, len(self._pending) - len(self._CLOSE_TAG) + 1)
+            if safe_length:
+                self._emit_thinking(self._pending[:safe_length])
+                self._pending = self._pending[safe_length:]
+            return
+
+    def _emit_response(self, value: str) -> None:
+        self._response_parts.append(value)
+        self._callback("content", value)
+
+    def _emit_thinking(self, value: str) -> None:
+        self._thinking_parts.append(value)
+        self._callback("thinking", value)
 
 
 def _normalize_usage(value: object) -> Mapping[str, object] | None:

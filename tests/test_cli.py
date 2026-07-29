@@ -432,6 +432,19 @@ class CliTests(unittest.TestCase):
             rendered,
         )
 
+    def test_cli_stream_renderer_separates_thinking_and_response(self):
+        stdout = io.StringIO()
+        renderer = cli._CliStreamRenderer(stdout, color=True)
+
+        renderer("thinking", "reasoning")
+        renderer("content", "answer")
+        renderer("complete", "")
+
+        self.assertEqual(
+            "\x1b[90mThinking:\nreasoning\x1b[0m\nAssistant:\nanswer\n",
+            stdout.getvalue(),
+        )
+
     def test_plan_formatter_surfaces_provider_failure(self):
         rendered = cli._format_plan(
             {
@@ -1011,13 +1024,26 @@ class RecordingPrivateAdapter:
     provider_id = "private-openai-compatible"
     instances = []
 
-    def __init__(self, *, base_url, model, api_key, timeout, provider_id, context_root):
+    def __init__(
+        self,
+        *,
+        base_url,
+        model,
+        api_key,
+        timeout,
+        provider_id,
+        context_root,
+        stream=False,
+        stream_callback=None,
+    ):
         self.base_url = base_url
         self.model = model
         self.api_key = api_key
         self.timeout = timeout
         self.provider_id = provider_id
         self.context_root = context_root
+        self.stream = stream
+        self.stream_callback = stream_callback
         self.instances.append(self)
 
     def execute(self, request):

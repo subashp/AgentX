@@ -25,6 +25,7 @@ class PrivateAdapterFixtureTestCase(unittest.TestCase):
         self.server = ThreadingHTTPServer(("127.0.0.1", 0), RecordingOpenAIHandler)
         self.server.requests = []
         self.server.response_status = 200
+        self.server.stream_events = None
         self.server.response_body = {
             "id": "chatcmpl-test",
             "choices": [
@@ -150,6 +151,61 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
             "The greeting is simple and needs a direct answer.",
             result.outcome["thinking"],
         )
+
+    def test_streaming_posts_stream_payload_and_emits_reasoning_and_content(self):
+        self.server.stream_events = [
+            {"choices": [{"delta": {"reasoning_content": "Think first. "}}]},
+            {"choices": [{"delta": {"reasoning_content": "Then answer."}}]},
+            {"choices": [{"delta": {"content": "Hello"}}]},
+            {"choices": [{"delta": {"content": " from Qwen."}}]},
+            {"usage": {"prompt_tokens": 5, "completion_tokens": 4, "total_tokens": 9}},
+        ]
+        events: list[tuple[str, str]] = []
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            stream=True,
+            stream_callback=lambda kind, value: events.append((kind, value)),
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(prompt="Hello", provider="private-openai-compatible")
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        self.assertTrue(result.outcome["streamed"])
+        self.assertEqual("Hello from Qwen.", result.outcome["response"])
+        self.assertEqual("Think first. Then answer.", result.outcome["thinking"])
+        self.assertEqual(
+            ["thinking", "thinking", "content", "content", "complete"],
+            [kind for kind, _ in events],
+        )
+        self.assertEqual("Hello from Qwen.", "".join(value for kind, value in events if kind == "content"))
+        self.assertTrue(self.server.requests[0]["json"]["stream"])
+
+    def test_streaming_splits_inline_think_tags_across_chunks(self):
+        self.server.stream_events = [
+            {"choices": [{"delta": {"content": "<thi"}}]},
+            {"choices": [{"delta": {"content": "nk>reasoning "}}]},
+            {"choices": [{"delta": {"content": "continues</think>"}}]},
+            {"choices": [{"delta": {"content": "Final answer."}}]},
+        ]
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            stream=True,
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(prompt="Hello", provider="private-openai-compatible")
+            )
+        )
+
+        self.assertEqual("reasoning continues", result.outcome["thinking"])
+        self.assertEqual("Final answer.", result.outcome["response"])
 
     def test_context_contents_are_bounded_to_policy_included_paths(self):
         context_root = self.fixture_root / "workspace"
@@ -301,14 +357,23 @@ class RecordingOpenAIHandler(BaseHTTPRequestHandler):
             request_record["json"] = None
         self.server.requests.append(request_record)
 
-        response_body = self.server.response_body
-        if isinstance(response_body, str):
-            raw_body = response_body.encode("utf-8")
+        if request_record["json"].get("stream"):
+            events = self.server.stream_events or []
+            raw_body = b"".join(
+                b"data: " + json.dumps(event).encode("utf-8") + b"\n\n"
+                for event in events
+            ) + b"data: [DONE]\n\n"
+            content_type = "text/event-stream"
         else:
-            raw_body = json.dumps(response_body).encode("utf-8")
+            response_body = self.server.response_body
+            if isinstance(response_body, str):
+                raw_body = response_body.encode("utf-8")
+            else:
+                raw_body = json.dumps(response_body).encode("utf-8")
+            content_type = "application/json"
 
         self.send_response(self.server.response_status)
-        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(raw_body)))
         self.end_headers()
         self.wfile.write(raw_body)
