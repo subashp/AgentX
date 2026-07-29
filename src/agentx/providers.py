@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 import shutil
 import urllib.error
 import urllib.parse
@@ -228,11 +227,7 @@ class ProviderRegistry:
 def _configured_endpoint(provider_settings) -> str | None:
     if provider_settings is None:
         return None
-    if provider_settings.endpoint:
-        return provider_settings.endpoint
-    if provider_settings.endpoint_env:
-        return os.environ.get(provider_settings.endpoint_env)
-    return None
+    return provider_settings.endpoint
 
 
 def _default_endpoint_check(endpoint: str) -> bool:

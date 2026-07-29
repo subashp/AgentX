@@ -66,7 +66,6 @@ class SettingsStoreTests(StoreFixtureTestCase):
                         "command": "codex",
                         "enabled": True,
                         "endpoint": None,
-                        "endpoint_env": None,
                         "model": None,
                         "subscription_check": None,
                         "timeout": 60.0,

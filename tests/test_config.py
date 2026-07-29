@@ -53,7 +53,6 @@ class SettingsLoaderTests(unittest.TestCase):
                     },
                     "private-openai-compatible": {
                         "endpoint": "http://127.0.0.1:8000/v1",
-                        "endpoint_env": "AGENTX_QWEN_ENDPOINT",
                         "model": "Qwen/Qwen3-14B",
                         "api_key_env": "AGENTX_QWEN_API_KEY",
                         "timeout": 120,
@@ -76,7 +75,6 @@ class SettingsLoaderTests(unittest.TestCase):
         self.assertEqual("codex-auth", settings.providers["codex"].auth_check)
         self.assertFalse(settings.providers["private-openai-compatible"].enabled)
         self.assertEqual("Qwen/Qwen3-14B", settings.providers["private-openai-compatible"].model)
-        self.assertEqual("AGENTX_QWEN_ENDPOINT", settings.providers["private-openai-compatible"].endpoint_env)
         self.assertEqual("AGENTX_QWEN_API_KEY", settings.providers["private-openai-compatible"].api_key_env)
         self.assertEqual(120.0, settings.providers["private-openai-compatible"].timeout)
 

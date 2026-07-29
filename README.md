@@ -23,41 +23,40 @@ hardware prerequisites, startup, client endpoints, and security constraints.
 
 ## Quickstart
 
-From a source checkout, make `src` importable first. You can do that with an
-editable install, or by setting `PYTHONPATH` to `src` in your shell. The examples
-below assume `src` is already importable.
+From a source checkout, install the `agentx` console command once:
 
 ```sh
-python -m agentx init
-python -m agentx providers list
-python -m agentx route "summarize the routing module"
-python -m agentx plan --context README.md "plan a documentation cleanup"
-python -m agentx init --profile codex --force
-python -m agentx plan --provider codex --context README.md "plan a documentation cleanup"
-python -m agentx execute --fake --allowed-patch README.md "try an offline execute run"
-python -m agentx config path
-python -m agentx config show
+python -m pip install --editable .
+```
+
+The command is then available on Windows, macOS, and Linux:
+
+```sh
+agentx init
+agentx providers list
+agentx route "summarize the routing module"
+agentx plan --context README.md "plan a documentation cleanup"
+agentx init --profile codex --force
+agentx plan --provider codex --context README.md "plan a documentation cleanup"
+agentx execute --fake --allowed-patch README.md "try an offline execute run"
+agentx config path
+agentx config show
 ```
 
 Use `--json` before the command for machine-readable output:
 
 ```sh
-python -m agentx --json route "summarize the routing module"
-python -m agentx --json config path
+agentx --json route "summarize the routing module"
+agentx --json config path
 ```
 
-The installed console script exposes the same commands as `agentx` when the
-package is installed in an environment:
-
-```sh
-agentx providers list
-agentx plan --fake "plan with the deterministic local adapter"
-```
+`python -m agentx` remains available as a Python-module fallback, but it is not
+the primary user-facing invocation.
 
 Run `agentx` without a subcommand to enter the provider-aware interactive CLI:
 
 ```sh
-python -m agentx
+agentx
 ```
 
 AgentX checks Codex, Claude Code, Kiro CLI, and the configured private model at
@@ -66,8 +65,8 @@ provider remains selected for subsequent tasks until you use `/provider` to
 change it:
 
 ```sh
-python -m agentx interactive --provider codex
-python -m agentx --provider claude
+agentx interactive --provider codex
+agentx --provider claude
 ```
 
 Inside the session, enter a task at the `agentx[provider]>` prompt. Use
@@ -81,7 +80,7 @@ the external settings-file path and an initialization command. The default
 settings file is outside the repository; inspect its resolved location with:
 
 ```sh
-python -m agentx config path
+agentx config path
 ```
 
 ## Provider Usage
@@ -96,9 +95,9 @@ Initialize a Codex profile, then run a read-only plan against a scoped
 workspace:
 
 ```sh
-python -m agentx init --profile codex --codex-command codex --force
-python -m agentx providers list
-python -m agentx plan --provider codex --context README.md \
+agentx init --profile codex --codex-command codex --force
+agentx providers list
+agentx plan --provider codex --context README.md \
   "review the README and propose documentation improvements"
 ```
 
@@ -112,8 +111,8 @@ Claude Code can be selected for a read-only plan when its CLI is installed and
 authenticated:
 
 ```sh
-python -m agentx providers list
-python -m agentx plan --provider claude --context README.md \
+agentx providers list
+agentx plan --provider claude --context README.md \
   "review the authentication module for design risks"
 ```
 
@@ -125,8 +124,8 @@ it does not enable file edits through this plan path.
 Kiro CLI can be selected when `kiro-cli` is installed and logged in:
 
 ```sh
-python -m agentx providers list
-python -m agentx plan --provider kiro --context README.md \
+agentx providers list
+agentx plan --provider kiro --context README.md \
   "review the current implementation and identify risks"
 ```
 
@@ -141,7 +140,7 @@ from inside AgentX. The endpoint may be local or a temporary remote tunnel;
 do not commit a changing ngrok URL to the repository:
 
 ```sh
-python -m agentx init \
+agentx init \
   --profile private-openai-compatible \
   --endpoint http://127.0.0.1:8000/v1 \
   --model Qwen/Qwen3-14B \
@@ -150,21 +149,18 @@ python -m agentx init \
 ```
 
 For a current ngrok tunnel, replace the endpoint with the active tunnel URL.
-Because the free ngrok URL changes after a restart, you can keep the profile
-stable and put the changing URL in an environment variable instead:
+Because the free ngrok URL changes after a restart, rerun the same command with
+the new URL. This updates the external settings file and does not modify the
+repository:
 
 ```sh
-python -m agentx init \
+agentx init \
   --profile private-openai-compatible \
-  --endpoint-env AGENTX_QWEN_ENDPOINT \
+  --endpoint https://<current-tunnel>.ngrok-free.app/v1 \
   --model Qwen/Qwen3-14B \
   --timeout 900 \
   --force
 ```
-
-Set `AGENTX_QWEN_ENDPOINT` to either `http://127.0.0.1:8000/v1` or the
-current `https://<current-tunnel>.ngrok-free.app/v1` value before invoking
-AgentX. `--endpoint` takes precedence when both are configured.
 
 The equivalent settings document, kept outside the source checkout, is:
 
@@ -184,14 +180,15 @@ The equivalent settings document, kept outside the source checkout, is:
 }
 ```
 
-Point AgentX at that settings file and inspect the endpoint and policy route:
+Keep this settings file at the path reported by `agentx config path`. If you
+choose a different path, set `AGENTX_SETTINGS` using the environment-variable
+syntax of your shell. Then inspect the endpoint and policy route:
 
 ```sh
-export AGENTX_SETTINGS=/path/to/agentx-settings.json
-python -m agentx providers list
-python -m agentx plan --provider private-openai-compatible \
+agentx providers list
+agentx plan --provider private-openai-compatible \
   "summarize the private planner implementation"
-python -m agentx --provider private-openai-compatible
+agentx --provider private-openai-compatible
 ```
 
 The endpoint must already be running; AgentX does not provision model weights,
@@ -201,7 +198,7 @@ authentication, configure only the name of an environment variable with
 settings or run artifacts:
 
 ```sh
-python -m agentx init \
+agentx init \
   --profile private-openai-compatible \
   --endpoint https://<current-tunnel>.ngrok-free.app/v1 \
   --model Qwen/Qwen3-14B \
@@ -216,7 +213,7 @@ Use `auto` to inspect the providers that pass availability and privacy policy
 filters:
 
 ```sh
-python -m agentx route --provider auto --mode review --explain \
+agentx route --provider auto --mode review --explain \
   "review the current change and identify the least expensive suitable route"
 ```
 
@@ -289,7 +286,7 @@ Implemented privacy controls include:
 
 AgentX keeps local state under an AgentX state root. The exact default location
 is platform-specific and intentionally treated as an implementation detail. Use
-`agentx config path` or `python -m agentx config path` to inspect the resolved
+`agentx config path` to inspect the resolved
 paths for the current environment.
 
 The state root is organized generically as:
@@ -367,9 +364,9 @@ only viable execution path.
 The CLI can write common profiles:
 
 ```sh
-python -m agentx init
-python -m agentx init --profile codex --codex-command codex --force
-python -m agentx init --profile private-openai-compatible \
+agentx init
+agentx init --profile codex --codex-command codex --force
+agentx init --profile private-openai-compatible \
   --endpoint http://127.0.0.1:8000/v1 --model Qwen/Qwen3-14B --force
 ```
 

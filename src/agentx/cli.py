@@ -41,7 +41,6 @@ def build_parser() -> argparse.ArgumentParser:
     init.add_argument("--force", action="store_true", help="overwrite an existing settings file")
     init.add_argument("--codex-command", default="codex", help="Codex command for the codex profile")
     init.add_argument("--endpoint", default=None, help="OpenAI-compatible base URL for the private provider profile")
-    init.add_argument("--endpoint-env", default=None, help="environment variable containing the OpenAI-compatible base URL")
     init.add_argument("--model", default=None, help="model ID for the private provider profile")
     init.add_argument("--api-key-env", default=None, help="environment variable containing the private provider API key")
     init.add_argument("--timeout", type=float, default=60.0, help="private provider request timeout in seconds")
@@ -178,7 +177,6 @@ def run(
             args.force,
             args.codex_command,
             args.endpoint,
-            args.endpoint_env,
             args.model,
             args.api_key_env,
             args.timeout,
@@ -521,7 +519,6 @@ def _init(
     force: bool,
     codex_command: str,
     endpoint: str | None,
-    endpoint_env: str | None,
     model: str | None,
     api_key_env: str | None,
     timeout: float,
@@ -536,7 +533,6 @@ def _init(
             base=settings,
             codex_command=codex_command,
             endpoint=endpoint,
-            endpoint_env=endpoint_env,
             model=model,
             api_key_env=api_key_env,
             timeout=timeout,
@@ -618,7 +614,6 @@ def _settings_for_profile(
     base,
     codex_command: str,
     endpoint: str | None,
-    endpoint_env: str | None,
     model: str | None,
     api_key_env: str | None,
     timeout: float,
@@ -640,10 +635,8 @@ def _settings_for_profile(
             providers={"codex": ProviderSettings(command=codex_command)},
         )
     if profile == "private-openai-compatible":
-        if not endpoint and not endpoint_env:
-            raise ConfigError(
-                "private-openai-compatible profile requires --endpoint or --endpoint-env."
-            )
+        if not endpoint:
+            raise ConfigError("private-openai-compatible profile requires --endpoint.")
         if not model:
             raise ConfigError("private-openai-compatible profile requires --model.")
         return Settings(
@@ -654,7 +647,6 @@ def _settings_for_profile(
             providers={
                 "private-openai-compatible": ProviderSettings(
                     endpoint=endpoint,
-                    endpoint_env=endpoint_env,
                     model=model,
                     api_key_env=api_key_env,
                     timeout=timeout,
@@ -759,10 +751,6 @@ def _plan(
             endpoint = (
                 provider_settings.endpoint
                 if provider_settings is not None
-                else None
-            ) or (
-                os.environ.get(provider_settings.endpoint_env)
-                if provider_settings is not None and provider_settings.endpoint_env
                 else None
             )
             if provider_settings is None or not endpoint:

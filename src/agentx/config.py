@@ -54,7 +54,6 @@ class Settings:
 class ProviderSettings:
     command: str | None = None
     endpoint: str | None = None
-    endpoint_env: str | None = None
     model: str | None = None
     api_key_env: str | None = None
     timeout: float = 60.0
@@ -66,7 +65,6 @@ class ProviderSettings:
         return {
             "command": self.command,
             "endpoint": self.endpoint,
-            "endpoint_env": self.endpoint_env,
             "model": self.model,
             "api_key_env": self.api_key_env,
             "timeout": self.timeout,
@@ -247,10 +245,6 @@ def _provider_settings(value: object) -> dict[str, ProviderSettings]:
         providers[provider_id] = ProviderSettings(
             command=_optional_string_field(raw_provider.get("command"), f"providers.{provider_id}.command"),
             endpoint=_optional_string_field(raw_provider.get("endpoint"), f"providers.{provider_id}.endpoint"),
-            endpoint_env=_optional_string_field(
-                raw_provider.get("endpoint_env"),
-                f"providers.{provider_id}.endpoint_env",
-            ),
             model=_optional_string_field(raw_provider.get("model"), f"providers.{provider_id}.model"),
             api_key_env=_optional_string_field(
                 raw_provider.get("api_key_env"),
