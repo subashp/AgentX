@@ -1,7 +1,11 @@
 from __future__ import annotations
 
+import json
 import os
 import shutil
+import urllib.error
+import urllib.parse
+import urllib.request
 from dataclasses import dataclass
 from typing import Callable, Iterable
 
@@ -77,7 +81,7 @@ class ProviderRegistry:
         self._settings = settings
         self._auth_check = auth_check or (lambda check_id: True)
         self._subscription_check = subscription_check or (lambda check_id: True)
-        self._endpoint_check = endpoint_check or (lambda endpoint: True)
+        self._endpoint_check = endpoint_check or _default_endpoint_check
 
     def list_statuses(self) -> tuple[ProviderStatus, ...]:
         return tuple(self._status_for(provider) for provider in self._providers)
@@ -106,6 +110,18 @@ class ProviderRegistry:
 
         if provider.kind == "openai_compatible":
             if endpoint:
+                if provider_settings is not None and not provider_settings.model:
+                    checks["model"] = False
+                    return ProviderStatus(
+                        id=provider.id,
+                        display_name=provider.display_name,
+                        kind=provider.kind,
+                        enabled=False,
+                        reason="model_not_configured",
+                        command=command,
+                        endpoint=endpoint,
+                        checks=checks,
+                    )
                 checks["endpoint"] = self._endpoint_check(endpoint)
                 if not checks["endpoint"]:
                     return ProviderStatus(
@@ -217,3 +233,28 @@ def _configured_endpoint(provider_settings) -> str | None:
     if provider_settings.endpoint_env:
         return os.environ.get(provider_settings.endpoint_env)
     return None
+
+
+def _default_endpoint_check(endpoint: str) -> bool:
+    parsed = urllib.parse.urlsplit(endpoint)
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
+        return False
+    path = parsed.path.rstrip("/")
+    if not path.endswith("/v1"):
+        path += "/v1"
+    url = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, path + "/models", "", ""))
+    request = urllib.request.Request(
+        url,
+        headers={
+            "Accept": "application/json",
+            "User-Agent": "agentx-provider-check/0.1",
+            "ngrok-skip-browser-warning": "true",
+        },
+        method="GET",
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=3.0) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except (OSError, TimeoutError, UnicodeDecodeError, json.JSONDecodeError, urllib.error.URLError):
+        return False
+    return isinstance(payload, dict) and isinstance(payload.get("data"), list)

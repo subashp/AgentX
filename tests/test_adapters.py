@@ -7,6 +7,7 @@ from unittest import mock
 from agentx.adapters import (
     AdapterRequest,
     AdapterResult,
+    CliPlanAdapter,
     CodexCliAdapter,
     ProcessResult,
     execute_adapter_run,
@@ -262,6 +263,48 @@ class CodexCliAdapterTests(AdapterFixtureTestCase):
         self.assertEqual(["execution_started", "process_output_captured", "execution_completed"], [event["event"] for event in transcript])
         self.assertEqual("1. inspect\n", transcript[1]["stdout"])
         self.assertEqual(9.0, runner.calls[0]["timeout"])
+
+
+class CliPlanAdapterTests(AdapterFixtureTestCase):
+    def test_cli_plan_adapter_builds_provider_command_and_captures_output(self):
+        runner = RecordingProcessRunner(ProcessResult(exit_code=0, stdout="Claude plan", stderr=""))
+        adapter = CliPlanAdapter(
+            provider_id="claude",
+            command="claude-under-test",
+            extra_args=("-p", "--permission-mode", "plan"),
+            cwd=Path("repo-root"),
+            process_runner=runner,
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(prompt="Review the change", provider="claude"),
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        self.assertEqual("claude", result.provider_id)
+        self.assertEqual("claude-cli", result.model_id)
+        self.assertEqual(
+            ("claude-under-test", "-p", "--permission-mode", "plan"),
+            runner.calls[0]["argv"][:-1],
+        )
+        self.assertEqual("Claude plan", result.transcript_events[1]["stdout"])
+
+    def test_cli_plan_adapter_maps_provider_failure(self):
+        runner = RecordingProcessRunner(ProcessResult(exit_code=3, stderr="not logged in"))
+        adapter = CliPlanAdapter(
+            provider_id="kiro",
+            command="kiro-cli-under-test",
+            extra_args=("chat", "--no-interactive", "--trust-tools=fs_read"),
+            process_runner=runner,
+        )
+
+        result = adapter.execute(AdapterRequest(run=AgentRun(prompt="Review", provider="kiro")))
+
+        self.assertEqual("failure", result.status)
+        self.assertEqual("kiro_cli_failed", result.outcome["outcome"])
+        self.assertEqual(3, result.outcome["exit_code"])
 
 
 class RecordingProcessRunner:

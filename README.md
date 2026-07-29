@@ -60,9 +60,10 @@ Run `agentx` without a subcommand to enter the provider-aware interactive CLI:
 python -m agentx
 ```
 
-AgentX lists configured providers and lets you choose `auto`, `codex`, Claude,
-or another available provider before accepting coding tasks. You can also fix
-the provider for the session:
+AgentX checks Codex, Claude Code, Kiro CLI, and the configured private model at
+startup. It then lets you choose a default provider for the session. That
+provider remains selected for subsequent tasks until you use `/provider` to
+change it:
 
 ```sh
 python -m agentx interactive --provider codex
@@ -71,10 +72,17 @@ python -m agentx --provider claude
 
 Inside the session, enter a task at the `agentx[provider]>` prompt. Use
 `/provider auto`, `/providers`, `/help`, or `/quit` to control the session.
-Codex, configured OpenAI-compatible endpoints, and the deterministic
-`fake-local` provider run their exposed plan workflows. Other providers
-currently return routing explanations until their live adapters are exposed
-through the public CLI.
+Codex, Claude Code, Kiro CLI, configured OpenAI-compatible endpoints, and the
+deterministic `fake-local` provider use the same read-only plan boundary and
+local AgentX audit artifacts.
+
+If the private model endpoint is missing, AgentX prints a startup warning with
+the external settings-file path and an initialization command. The default
+settings file is outside the repository; inspect its resolved location with:
+
+```sh
+python -m agentx config path
+```
 
 ## Provider Usage
 
@@ -100,19 +108,30 @@ it does not apply source changes in plan mode.
 
 ### Claude
 
-Claude Code can be discovered and included in route explanations when its CLI
-is installed and enabled in settings:
+Claude Code can be selected for a read-only plan when its CLI is installed and
+authenticated:
 
 ```sh
 python -m agentx providers list
-python -m agentx route --provider claude --mode review --explain \
+python -m agentx plan --provider claude --context README.md \
   "review the authentication module for design risks"
 ```
 
-The current public CLI does not yet execute live Claude plans. In this phase,
-the Claude adapter is represented by provider discovery and routing contracts;
-`plan --provider claude` will report that live Claude execution is not yet
-supported.
+AgentX invokes Claude Code in print/plan mode from a policy-scoped workspace;
+it does not enable file edits through this plan path.
+
+### Kiro CLI
+
+Kiro CLI can be selected when `kiro-cli` is installed and logged in:
+
+```sh
+python -m agentx providers list
+python -m agentx plan --provider kiro --context README.md \
+  "review the current implementation and identify risks"
+```
+
+AgentX invokes Kiro's non-interactive chat mode with read-only filesystem
+access for the plan workflow.
 
 ### Self-hosted models, such as Qwen3-Coder
 
@@ -221,6 +240,10 @@ The public CLI currently supports:
   plan workflow and write local artifacts.
 - `plan --provider codex`: run a live Codex CLI plan against a scoped read-only
   workspace built from policy-visible context.
+- `plan --provider claude`: run a live Claude Code print/plan request against a
+  scoped read-only workspace.
+- `plan --provider kiro`: run a live Kiro CLI non-interactive plan with
+  read-only filesystem access.
 - `plan --provider private-openai-compatible`: run a live plan through a
   configured local or remote OpenAI-compatible endpoint.
 - `execute --fake`: run the deterministic offline execute workflow, validate any
@@ -230,8 +253,9 @@ The public CLI currently supports:
 - `config path`: show the resolved AgentX state paths.
 - `config show`: show resolved settings.
 
-Live execution is exposed only for Codex plan mode in this phase. Execute/apply
-mode remains fake-only and never applies source mutations.
+Live execution is exposed for Codex, Claude Code, Kiro CLI, and the configured
+OpenAI-compatible plan adapters. Execute/apply mode remains fake-only and never
+applies source mutations.
 
 ## Privacy Model
 

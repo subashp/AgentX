@@ -8,7 +8,7 @@ import uuid
 from pathlib import Path
 from typing import Sequence, TextIO
 
-from .adapters import AdapterError, CodexCliAdapter, execute_fake_run
+from .adapters import AdapterError, CliPlanAdapter, CodexCliAdapter, execute_fake_run
 from .config import ConfigError, ProviderSettings, Settings, load_settings
 from .openai_compatible import OpenAICompatibleAdapter
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
@@ -242,9 +242,16 @@ def run(
             requested_provider=args.provider,
             settings=settings,
         )
-        if provider not in {"auto", "codex", "private-openai-compatible", "fake-local"}:
+        if provider not in {
+            "auto",
+            "codex",
+            "claude",
+            "kiro",
+            "private-openai-compatible",
+            "fake-local",
+        }:
             stderr.write(
-                f"agentx: plan provider '{provider}' is not supported; use codex, private-openai-compatible, or fake-local.\n"
+                f"agentx: plan provider '{provider}' is not supported; use codex, claude, kiro, private-openai-compatible, or fake-local.\n"
             )
             return 2
         return _plan(
@@ -331,6 +338,8 @@ def _interactive(
     stdout.write("AgentX interactive mode\n")
     stdout.write("Type /help for commands or /quit to exit.\n")
 
+    _write_custom_provider_startup_warning(settings, statuses, stdout)
+
     if selected_provider is None:
         stdout.write("\nProviders:\n")
         stdout.write("  1. auto - route by policy and availability\n")
@@ -355,6 +364,13 @@ def _interactive(
             f"agentx: unknown provider '{selected_provider}'. Use /providers to list providers.\n"
         )
         return 2
+    if selected_provider != "auto":
+        selected_status = next(status for status in statuses if status.id == selected_provider)
+        if not selected_status.enabled:
+            stderr.write(
+                f"agentx: provider '{selected_provider}' is unavailable: {selected_status.reason}.\n"
+            )
+            return 2
 
     while True:
         stdout.write(f"\nagentx[{selected_provider}]> ")
@@ -388,15 +404,25 @@ def _interactive(
             if requested not in provider_ids:
                 stderr.write(f"agentx: unknown provider '{requested}'.\n")
                 continue
+            if requested != "auto":
+                requested_status = next(status for status in statuses if status.id == requested)
+                if not requested_status.enabled:
+                    stderr.write(
+                        f"agentx: provider '{requested}' is unavailable: {requested_status.reason}.\n"
+                    )
+                    continue
             selected_provider = requested
             stdout.write(f"Provider changed to {selected_provider}.\n")
             continue
 
         session_id = f"interactive-{uuid.uuid4().hex[:12]}"
-        if selected_provider in {"codex", "private-openai-compatible"}:
+        task_provider = selected_provider
+        if selected_provider == "auto":
+            task_provider = _select_auto_interactive_provider(settings, statuses)
+        if task_provider in {"codex", "claude", "kiro", "private-openai-compatible"}:
             _plan(
                 prompt,
-                selected_provider,
+                task_provider,
                 None,
                 session_id,
                 ".",
@@ -427,6 +453,46 @@ def _interactive(
                     f"{selected_provider} is currently available for routing explanations only.\n"
                 )
             _route(prompt, "plan", selected_provider, None, settings, False, stdout, stderr)
+
+
+def _select_auto_interactive_provider(settings, statuses) -> str:
+    status_by_id = {status.id: status for status in statuses}
+    candidates = list(settings.public_providers)
+    if settings.private_provider:
+        candidates.append(settings.private_provider)
+    candidates.extend(status.id for status in statuses)
+    for provider_id in candidates:
+        status = status_by_id.get(provider_id)
+        if status is not None and status.enabled:
+            return provider_id
+    return "auto"
+
+
+def _write_custom_provider_startup_warning(settings, statuses, stdout) -> None:
+    custom = next(
+        (status for status in statuses if status.id == "private-openai-compatible"),
+        None,
+    )
+    if custom is None or custom.enabled:
+        return
+
+    stdout.write(
+        "\nWarning: custom model provider is unavailable "
+        f"({custom.reason}).\n"
+    )
+    stdout.write(f"External settings file: {settings.paths.settings}\n")
+    if custom.reason == "endpoint_not_configured":
+        stdout.write(
+            "Configure it before starting work, for example:\n"
+            "  agentx init --profile private-openai-compatible "
+            "--endpoint <local-or-ngrok-url>/v1 --model <model-id> --force\n"
+        )
+    elif custom.reason == "model_not_configured":
+        stdout.write(
+            "Add the custom model ID to that settings file or rerun the private-provider init profile.\n"
+        )
+    else:
+        stdout.write("Check the endpoint and model settings before selecting the custom provider.\n")
 
 
 def _route(
@@ -641,6 +707,41 @@ def _plan(
                 command=command,
                 cwd=scoped_workspace,
                 extra_args=("-C", str(scoped_workspace)),
+            )
+            scoped_source_root = Path(source_root)
+        elif provider in {"claude", "kiro"}:
+            run_provider = provider
+            provider_statuses = ProviderRegistry(settings=settings).list_statuses()
+            provider_status = next(
+                (status for status in provider_statuses if status.id == provider),
+                None,
+            )
+            if provider_status is None or not provider_status.enabled:
+                reason = "not registered" if provider_status is None else provider_status.reason
+                stderr.write(f"agentx: provider '{provider}' is not available: {reason}\n")
+                return 2
+            provider_settings = settings.providers.get(provider)
+            command = (
+                provider_settings.command
+                if provider_settings is not None and provider_settings.command
+                else provider_status.command
+            )
+            if not command:
+                stderr.write(f"agentx: provider '{provider}' has no executable command configured.\n")
+                return 2
+            scoped_workspace = (
+                SessionStore(settings.paths).path_for_session(session_id) / "workspace"
+            ).resolve()
+            extra_args = (
+                ("-p", "--permission-mode", "plan", "--no-session-persistence", "--output-format", "text")
+                if provider == "claude"
+                else ("chat", "--no-interactive", "--trust-tools=fs_read")
+            )
+            adapter = CliPlanAdapter(
+                provider_id=provider,
+                command=command,
+                extra_args=extra_args,
+                cwd=scoped_workspace,
             )
             scoped_source_root = Path(source_root)
         elif provider == "private-openai-compatible":

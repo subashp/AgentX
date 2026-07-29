@@ -118,7 +118,14 @@ class ProviderRegistryTests(unittest.TestCase):
     def test_configured_private_endpoint_can_be_available(self):
         registry = ProviderRegistry(
             [ProviderDefinition("private", "Private", "openai_compatible", None, public=False)],
-            settings=settings({"private": ProviderSettings(endpoint="http://localhost:8000/v1")}),
+            settings=settings(
+                {
+                    "private": ProviderSettings(
+                        endpoint="http://localhost:8000/v1",
+                        model="local-coder",
+                    )
+                }
+            ),
             endpoint_check=lambda endpoint: True,
         )
 
@@ -131,7 +138,14 @@ class ProviderRegistryTests(unittest.TestCase):
     def test_unhealthy_private_endpoint_is_disabled(self):
         registry = ProviderRegistry(
             [ProviderDefinition("private", "Private", "openai_compatible", None, public=False)],
-            settings=settings({"private": ProviderSettings(endpoint="http://localhost:8000/v1")}),
+            settings=settings(
+                {
+                    "private": ProviderSettings(
+                        endpoint="http://localhost:8000/v1",
+                        model="local-coder",
+                    )
+                }
+            ),
             endpoint_check=lambda endpoint: False,
         )
 
@@ -148,6 +162,7 @@ class ProviderRegistryTests(unittest.TestCase):
                 {
                     "private": ProviderSettings(
                         endpoint_env="AGENTX_TEST_ENDPOINT",
+                        model="local-coder",
                     )
                 }
             ),
@@ -159,6 +174,29 @@ class ProviderRegistryTests(unittest.TestCase):
 
         self.assertTrue(statuses[0].enabled)
         self.assertEqual("http://127.0.0.1:8000/v1", statuses[0].endpoint)
+
+    def test_default_private_endpoint_check_queries_models(self):
+        registry = ProviderRegistry(
+            [ProviderDefinition("private", "Private", "openai_compatible", None, public=False)],
+            settings=settings(
+                {
+                    "private": ProviderSettings(
+                        endpoint="https://model.example/v1",
+                        model="local-coder",
+                    )
+                }
+            ),
+        )
+        response = mock.MagicMock()
+        response.__enter__.return_value.read.return_value = b'{"data":[{"id":"local-coder"}]}'
+
+        with mock.patch("agentx.providers.urllib.request.urlopen", return_value=response) as opener:
+            statuses = registry.list_statuses()
+
+        self.assertTrue(statuses[0].enabled)
+        request = opener.call_args.args[0]
+        self.assertEqual("https://model.example/v1/models", request.full_url)
+        self.assertEqual("true", request.get_header("Ngrok-skip-browser-warning"))
 
 
 if __name__ == "__main__":

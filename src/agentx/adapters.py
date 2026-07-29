@@ -344,6 +344,109 @@ class CodexCliAdapter:
         )
 
 
+@dataclass(frozen=True)
+class CliPlanAdapter:
+    """Provider-neutral read-only adapter for non-interactive coding CLIs."""
+
+    provider_id: str
+    command: str
+    extra_args: tuple[str, ...] = ()
+    cwd: str | Path | None = None
+    env: Mapping[str, str] | None = None
+    timeout: float | None = 300.0
+    process_runner: ProcessRunner = SubprocessRunner()
+    model_id: str | None = None
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "provider_id", _normalize_non_empty_string(self.provider_id, "provider_id"))
+        object.__setattr__(self, "command", _normalize_non_empty_string(self.command, "command"))
+        object.__setattr__(self, "extra_args", _normalize_string_sequence(self.extra_args, "extra_args"))
+        if self.cwd is not None and not isinstance(self.cwd, (str, Path)):
+            raise AdapterError("cwd must be a string, Path, or None.")
+        if self.env is not None:
+            object.__setattr__(self, "env", _normalize_env(self.env))
+        if self.timeout is not None:
+            object.__setattr__(self, "timeout", _normalize_optional_timeout(self.timeout))
+        if self.model_id is not None:
+            object.__setattr__(self, "model_id", _normalize_non_empty_string(self.model_id, "model_id"))
+        if not hasattr(self.process_runner, "run") or not callable(self.process_runner.run):
+            raise AdapterError("process_runner must provide run().")
+
+    def execute(self, request: AdapterRequest) -> AdapterResult:
+        run = request.run
+        model_tier = _selected_model_tier(run, request.route)
+        model_id = _selected_model_id(self.model_id or f"{self.provider_id}-cli", request.route)
+        argv = self.build_argv(run)
+        process_result = self.process_runner.run(
+            argv,
+            cwd=self.cwd,
+            env=self.env,
+            timeout=self.timeout,
+        )
+        if not isinstance(process_result, ProcessResult):
+            raise AdapterError("process_runner.run must return a ProcessResult.")
+
+        status = "success" if process_result.exit_code == 0 else "failure"
+        transcript_events = (
+            {
+                "sequence": 1,
+                "event": "execution_started",
+                "provider_id": self.provider_id,
+                "model_id": model_id,
+                "model_tier": model_tier,
+                "mode": run.mode,
+                "argv": list(argv),
+                "cwd": None if self.cwd is None else str(self.cwd),
+                "timeout_seconds": self.timeout,
+            },
+            {
+                "sequence": 2,
+                "event": "process_output_captured",
+                "stdout": process_result.stdout,
+                "stderr": process_result.stderr,
+            },
+            {
+                "sequence": 3,
+                "event": "execution_completed",
+                "status": status,
+                "exit_code": process_result.exit_code,
+            },
+        )
+        outcome = {
+            "status": status,
+            "outcome": (
+                f"{self.provider_id}_cli_completed"
+                if status == "success"
+                else f"{self.provider_id}_cli_failed"
+            ),
+            "summary": _cli_outcome_summary(self.provider_id, process_result),
+            "exit_code": process_result.exit_code,
+            "patch_applied": False,
+        }
+        return AdapterResult(
+            provider_id=self.provider_id,
+            model_id=model_id,
+            model_tier=model_tier,
+            status=status,
+            transcript_events=transcript_events,
+            cost={
+                "currency": "USD",
+                "estimated": False,
+                "known": False,
+                "input_tokens": 0,
+                "output_tokens": 0,
+                "total_cost_usd": 0.0,
+            },
+            outcome=outcome,
+            patch="",
+        )
+
+    def build_argv(self, run: AgentRun) -> tuple[str, ...]:
+        if not isinstance(run, AgentRun):
+            raise AdapterError("run must be an AgentRun.")
+        return (self.command, *self.extra_args, _build_codex_plan_prompt(run))
+
+
 def execute_adapter_run(
     *,
     session_store: SessionStore,
@@ -560,6 +663,12 @@ def _codex_outcome_summary(process_result: ProcessResult) -> str:
     return f"Codex CLI exited with code {process_result.exit_code}."
 
 
+def _cli_outcome_summary(provider_id: str, process_result: ProcessResult) -> str:
+    if process_result.exit_code == 0:
+        return f"{provider_id} CLI completed successfully without applying patches through AgentX."
+    return f"{provider_id} CLI exited with code {process_result.exit_code}."
+
+
 def _timeout_output_to_string(value: object) -> str:
     if value is None:
         return ""
@@ -572,6 +681,7 @@ __all__ = [
     "AdapterError",
     "AdapterRequest",
     "AdapterResult",
+    "CliPlanAdapter",
     "CodexCliAdapter",
     "FakeLocalAdapter",
     "ProcessResult",

@@ -282,6 +282,79 @@ class CliTests(unittest.TestCase):
         self.assertEqual("codex", plan.call_args.args[1])
         self.assertIn("agentx[codex]>", stdout.getvalue())
 
+    def test_interactive_keeps_provider_until_provider_command_changes_it(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        settings = Settings(
+            paths=AgentXPaths(
+                root=Path("tests") / ".tmp_cli_interactive_switch",
+                settings=Path("tests") / ".tmp_cli_interactive_switch" / "settings.json",
+                sessions=Path("tests") / ".tmp_cli_interactive_switch" / "sessions",
+                memories=Path("tests") / ".tmp_cli_interactive_switch" / "memories",
+                auth=Path("tests") / ".tmp_cli_interactive_switch" / "auth",
+            )
+        )
+        statuses = (
+            ProviderStatus("codex", "Codex CLI", "cli", True, "available", command="codex"),
+            ProviderStatus("claude", "Claude Code", "cli", True, "available", command="claude"),
+            ProviderStatus("kiro", "Kiro CLI", "cli", True, "available", command="kiro-cli"),
+            ProviderStatus(
+                "private-openai-compatible",
+                "Private OpenAI-Compatible Endpoint",
+                "openai_compatible",
+                False,
+                "endpoint_not_configured",
+            ),
+        )
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                with mock.patch("agentx.cli._plan") as plan:
+                    code = cli.run(
+                        [],
+                        stdout,
+                        stderr,
+                        io.StringIO("1\nfirst task\n/provider claude\nsecond task\n/quit\n"),
+                    )
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual(["codex", "claude"], [call.args[1] for call in plan.call_args_list])
+        self.assertIn("Warning: custom model provider is unavailable", stdout.getvalue())
+        self.assertIn("External settings file:", stdout.getvalue())
+        self.assertIn("agentx[auto]>", stdout.getvalue())
+        self.assertIn("agentx[claude]>", stdout.getvalue())
+
+    def test_interactive_rejects_switch_to_unavailable_provider(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        settings = Settings(
+            paths=AgentXPaths(
+                root=Path("tests") / ".tmp_cli_interactive_reject",
+                settings=Path("tests") / ".tmp_cli_interactive_reject" / "settings.json",
+                sessions=Path("tests") / ".tmp_cli_interactive_reject" / "sessions",
+                memories=Path("tests") / ".tmp_cli_interactive_reject" / "memories",
+                auth=Path("tests") / ".tmp_cli_interactive_reject" / "auth",
+            )
+        )
+        statuses = (
+            ProviderStatus("codex", "Codex CLI", "cli", True, "available", command="codex"),
+            ProviderStatus("claude", "Claude Code", "cli", False, "disabled_missing_binary", command="claude"),
+        )
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                code = cli.run(
+                    ["interactive", "--provider", "codex"],
+                    stdout,
+                    stderr,
+                    io.StringIO("/provider claude\n/quit\n"),
+                )
+
+        self.assertEqual(0, code)
+        self.assertIn("provider 'claude' is unavailable", stderr.getvalue())
+        self.assertIn("agentx[codex]>", stdout.getvalue())
+
     def test_plan_formatter_surfaces_provider_stdout_and_stderr(self):
         rendered = cli._format_plan(
             {
@@ -522,15 +595,15 @@ class CliTests(unittest.TestCase):
             if root.exists():
                 shutil.rmtree(root)
 
-    def test_plan_rejects_unsupported_live_provider(self):
+    def test_plan_rejects_unknown_live_provider(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
 
-        code = cli.run(["plan", "--provider", "claude", "local plan"], stdout, stderr)
+        code = cli.run(["plan", "--provider", "unknown", "local plan"], stdout, stderr)
 
         self.assertEqual(2, code)
         self.assertEqual("", stdout.getvalue())
-        self.assertIn("provider 'claude' is not supported", stderr.getvalue())
+        self.assertIn("provider 'unknown' is not supported", stderr.getvalue())
 
     def test_provider_fake_local_matches_fake_shorthand_without_registry(self):
         stdout = io.StringIO()
