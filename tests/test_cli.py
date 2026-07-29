@@ -118,6 +118,74 @@ class CliTests(unittest.TestCase):
             if root.exists():
                 shutil.rmtree(root)
 
+    def test_init_private_profile_writes_endpoint_model_and_secret_reference(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_init_private"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+
+        try:
+            settings = Settings(
+                paths=AgentXPaths(
+                    root=root,
+                    settings=root / "settings.json",
+                    sessions=root / "sessions",
+                    memories=root / "memories",
+                    auth=root / "auth",
+                )
+            )
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                code = cli.run(
+                    [
+                        "init",
+                        "--profile",
+                        "private-openai-compatible",
+                        "--endpoint",
+                        "http://127.0.0.1:8000/v1",
+                        "--model",
+                        "Qwen/Qwen3-14B",
+                        "--api-key-env",
+                        "AGENTX_QWEN_API_KEY",
+                        "--timeout",
+                        "180",
+                    ],
+                    stdout,
+                    stderr,
+                )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            written = json.loads((root / "settings.json").read_text(encoding="utf-8"))
+            self.assertEqual("private-openai-compatible", written["private_provider"])
+            provider = written["providers"]["private-openai-compatible"]
+            self.assertEqual("http://127.0.0.1:8000/v1", provider["endpoint"])
+            self.assertEqual("Qwen/Qwen3-14B", provider["model"])
+            self.assertEqual("AGENTX_QWEN_API_KEY", provider["api_key_env"])
+            self.assertEqual(180.0, provider["timeout"])
+            initialized = Settings(
+                paths=settings.paths,
+                private_provider="private-openai-compatible",
+                providers={
+                    "private-openai-compatible": ProviderSettings(
+                        endpoint="http://127.0.0.1:8000/v1",
+                        model="Qwen/Qwen3-14B",
+                    )
+                },
+            )
+            self.assertEqual(
+                "private-openai-compatible",
+                cli._resolve_plan_provider(
+                    fake=False,
+                    requested_provider="auto",
+                    settings=initialized,
+                ),
+            )
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
     def test_config_path_outputs_json(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -634,6 +702,77 @@ class CliTests(unittest.TestCase):
             if root.exists():
                 shutil.rmtree(root)
 
+    def test_private_plan_constructs_configured_openai_compatible_adapter(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_private"
+        if root.exists():
+            shutil.rmtree(root)
+        state = root / "state"
+        settings = Settings(
+            paths=AgentXPaths(
+                root=state,
+                settings=state / "settings.json",
+                sessions=state / "sessions",
+                memories=state / "memories",
+                auth=state / "auth",
+            ),
+            private_provider="private-openai-compatible",
+            providers={
+                "private-openai-compatible": ProviderSettings(
+                    endpoint="https://example.ngrok-free.app/v1",
+                    model="Qwen/Qwen3-14B",
+                    api_key_env="AGENTX_TEST_API_KEY",
+                    timeout=180.0,
+                )
+            },
+        )
+        statuses = (
+            ProviderStatus(
+                id="private-openai-compatible",
+                display_name="Private OpenAI-Compatible Endpoint",
+                kind="openai_compatible",
+                enabled=True,
+                reason="available",
+                endpoint="https://example.ngrok-free.app/v1",
+            ),
+        )
+
+        RecordingPrivateAdapter.instances.clear()
+        try:
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                    registry.return_value.list_statuses.return_value = statuses
+                    with mock.patch("agentx.cli.OpenAICompatibleAdapter", RecordingPrivateAdapter):
+                        with mock.patch.dict("os.environ", {"AGENTX_TEST_API_KEY": "test-key"}):
+                            code = cli.run(
+                                [
+                                    "--json",
+                                    "plan",
+                                    "--provider",
+                                    "private-openai-compatible",
+                                    "--session-id",
+                                    "private-plan",
+                                    "hello from private model",
+                                ],
+                                stdout,
+                                stderr,
+                            )
+
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            payload = json.loads(stdout.getvalue())
+            self.assertEqual("private-openai-compatible", payload["run"]["provider"])
+            self.assertEqual("private-openai-compatible", payload["result"]["provider_id"])
+            adapter = RecordingPrivateAdapter.instances[0]
+            self.assertEqual("https://example.ngrok-free.app/v1", adapter.base_url)
+            self.assertEqual("Qwen/Qwen3-14B", adapter.model)
+            self.assertEqual("test-key", adapter.api_key)
+            self.assertEqual(180.0, adapter.timeout)
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
     def test_execute_outputs_json_and_writes_validation_artifacts_without_provider_registry(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
@@ -738,6 +877,34 @@ class RecordingCodexAdapter:
             cost={"currency": "USD", "estimated": False, "total_cost_usd": 0.0},
             outcome={"status": "success", "outcome": "codex_test_completed"},
             patch="diff --git a/README.md b/README.md\n",
+        )
+
+
+class RecordingPrivateAdapter:
+    provider_id = "private-openai-compatible"
+    instances = []
+
+    def __init__(self, *, base_url, model, api_key, timeout, provider_id, context_root):
+        self.base_url = base_url
+        self.model = model
+        self.api_key = api_key
+        self.timeout = timeout
+        self.provider_id = provider_id
+        self.context_root = context_root
+        self.instances.append(self)
+
+    def execute(self, request):
+        return AdapterResult(
+            provider_id=self.provider_id,
+            model_id=self.model,
+            model_tier="high",
+            status="success",
+            transcript_events=(
+                {"sequence": 1, "event": "execution_completed", "status": "success"},
+            ),
+            cost={"currency": "USD", "estimated": False, "total_cost_usd": 0.0},
+            outcome={"status": "success", "outcome": "private_test_completed", "summary": "private response"},
+            patch="",
         )
 
 

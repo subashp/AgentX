@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 import shutil
 from dataclasses import dataclass
 from typing import Callable, Iterable
@@ -98,7 +99,7 @@ class ProviderRegistry:
             )
 
         command = provider_settings.command if provider_settings and provider_settings.command else provider.command
-        endpoint = provider_settings.endpoint if provider_settings else None
+        endpoint = _configured_endpoint(provider_settings)
 
         if provider.kind == "builtin":
             return self._checked_status(provider, command, endpoint, None, checks)
@@ -206,3 +207,13 @@ class ProviderRegistry:
             endpoint=endpoint,
             checks=checks,
         )
+
+
+def _configured_endpoint(provider_settings) -> str | None:
+    if provider_settings is None:
+        return None
+    if provider_settings.endpoint:
+        return provider_settings.endpoint
+    if provider_settings.endpoint_env:
+        return os.environ.get(provider_settings.endpoint_env)
+    return None

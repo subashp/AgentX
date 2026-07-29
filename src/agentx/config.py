@@ -54,6 +54,10 @@ class Settings:
 class ProviderSettings:
     command: str | None = None
     endpoint: str | None = None
+    endpoint_env: str | None = None
+    model: str | None = None
+    api_key_env: str | None = None
+    timeout: float = 60.0
     enabled: bool = True
     auth_check: str | None = None
     subscription_check: str | None = None
@@ -62,6 +66,10 @@ class ProviderSettings:
         return {
             "command": self.command,
             "endpoint": self.endpoint,
+            "endpoint_env": self.endpoint_env,
+            "model": self.model,
+            "api_key_env": self.api_key_env,
+            "timeout": self.timeout,
             "enabled": self.enabled,
             "auth_check": self.auth_check,
             "subscription_check": self.subscription_check,
@@ -239,6 +247,19 @@ def _provider_settings(value: object) -> dict[str, ProviderSettings]:
         providers[provider_id] = ProviderSettings(
             command=_optional_string_field(raw_provider.get("command"), f"providers.{provider_id}.command"),
             endpoint=_optional_string_field(raw_provider.get("endpoint"), f"providers.{provider_id}.endpoint"),
+            endpoint_env=_optional_string_field(
+                raw_provider.get("endpoint_env"),
+                f"providers.{provider_id}.endpoint_env",
+            ),
+            model=_optional_string_field(raw_provider.get("model"), f"providers.{provider_id}.model"),
+            api_key_env=_optional_string_field(
+                raw_provider.get("api_key_env"),
+                f"providers.{provider_id}.api_key_env",
+            ),
+            timeout=_optional_timeout_field(
+                raw_provider.get("timeout", 60.0),
+                f"providers.{provider_id}.timeout",
+            ),
             enabled=_optional_bool_field(raw_provider.get("enabled", True), f"providers.{provider_id}.enabled"),
             auth_check=_optional_string_field(
                 raw_provider.get("auth_check"),
@@ -264,3 +285,12 @@ def _optional_bool_field(value: object, field_name: str) -> bool:
     if not isinstance(value, bool):
         raise ConfigError(f"{field_name} must be a boolean.")
     return value
+
+
+def _optional_timeout_field(value: object, field_name: str) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise ConfigError(f"{field_name} must be a number.")
+    normalized = float(value)
+    if normalized <= 0:
+        raise ConfigError(f"{field_name} must be greater than zero.")
+    return normalized

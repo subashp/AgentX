@@ -7,6 +7,7 @@ import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any, Callable
 
 from .adapters import (
@@ -90,6 +91,10 @@ class OpenAICompatibleChatClient:
             "Accept": "application/json",
             "Content-Type": "application/json",
             "User-Agent": "agentx-openai-compatible/0.1",
+            # ngrok's free browser interstitial otherwise intercepts API
+            # clients before forwarding requests to the OpenAI-compatible
+            # service. This is harmless for local and authenticated gateways.
+            "ngrok-skip-browser-warning": "true",
         }
         if self.api_key is not None:
             headers["Authorization"] = "Bearer " + self.api_key
@@ -165,9 +170,13 @@ class OpenAICompatibleAdapter:
         api_key: str | None = None,
         timeout: float = 60.0,
         provider_id: str = DEFAULT_PROVIDER_ID,
+        context_root: str | Path | None = None,
         client: OpenAICompatibleChatClient | None = None,
     ) -> None:
         self.provider_id = _normalize_non_empty_string(provider_id, "provider_id")
+        if context_root is not None and not isinstance(context_root, (str, Path)):
+            raise AdapterError("context_root must be a string, Path, or None.")
+        self.context_root = None if context_root is None else Path(context_root)
         if client is not None:
             if not isinstance(client, OpenAICompatibleChatClient):
                 raise AdapterError("client must be an OpenAICompatibleChatClient.")
@@ -190,7 +199,11 @@ class OpenAICompatibleAdapter:
         run = request.run
         model_tier = _selected_model_tier(run, request.route)
         model_id = _selected_model_id(self.client.model, request.route)
-        messages = _build_agentx_messages(run)
+        messages = _build_agentx_messages(
+            run,
+            context_map=request.context_map,
+            context_root=self.context_root,
+        )
         transcript_prefix = (
             {
                 "sequence": 1,
@@ -315,7 +328,16 @@ class OpenAICompatibleAdapter:
         )
 
 
-def _build_agentx_messages(run: AgentRun) -> tuple[Mapping[str, str], ...]:
+_MAX_CONTEXT_FILE_CHARACTERS = 12_000
+_MAX_CONTEXT_CHARACTERS = 28_000
+
+
+def _build_agentx_messages(
+    run: AgentRun,
+    *,
+    context_map: Mapping[str, object] | None = None,
+    context_root: Path | None = None,
+) -> tuple[Mapping[str, str], ...]:
     system = "\n".join(
         (
             "You are running behind AgentX as a private OpenAI-compatible provider adapter.",
@@ -332,6 +354,12 @@ def _build_agentx_messages(run: AgentRun) -> tuple[Mapping[str, str], ...]:
     if run.context_paths:
         lines.append("Context paths:")
         lines.extend(f"- {path}" for path in run.context_paths)
+    context_text = _read_visible_context(
+        context_map=context_map,
+        context_root=context_root,
+    )
+    if context_text:
+        lines.extend(("", "Policy-approved context contents:", context_text))
     if run.task_hints:
         lines.append("Task hints:")
         lines.extend(f"- {hint}" for hint in run.task_hints)
@@ -349,6 +377,47 @@ def _build_agentx_messages(run: AgentRun) -> tuple[Mapping[str, str], ...]:
         {"role": "system", "content": system},
         {"role": "user", "content": "\n".join(lines)},
     )
+
+
+def _read_visible_context(
+    *,
+    context_map: Mapping[str, object] | None,
+    context_root: Path | None,
+) -> str:
+    if context_map is None or context_root is None:
+        return ""
+    included_paths = context_map.get("included_paths")
+    if not isinstance(included_paths, Sequence) or isinstance(included_paths, (str, bytes)):
+        return ""
+
+    root = context_root.resolve()
+    sections: list[str] = []
+    total_characters = 0
+    for raw_path in included_paths:
+        if not isinstance(raw_path, str) or not raw_path.strip():
+            continue
+        relative_path = Path(raw_path)
+        if relative_path.is_absolute() or ".." in relative_path.parts:
+            continue
+        path = (root / relative_path).resolve()
+        if path != root and root not in path.parents:
+            continue
+        if not path.is_file():
+            continue
+        try:
+            full_content = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            continue
+        remaining = _MAX_CONTEXT_CHARACTERS - total_characters
+        if remaining <= 0:
+            break
+        content = full_content[: min(_MAX_CONTEXT_FILE_CHARACTERS, remaining)]
+        if not content:
+            continue
+        suffix = "" if len(content) == len(full_content) else "\n[truncated]"
+        sections.append(f"--- {raw_path} ---\n{content}{suffix}")
+        total_characters += len(content) + len(raw_path) + 10
+    return "\n\n".join(sections)
 
 
 def _chat_completions_url(base_url: str) -> str:

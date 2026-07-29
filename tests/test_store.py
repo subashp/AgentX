@@ -62,10 +62,14 @@ class SettingsStoreTests(StoreFixtureTestCase):
                 "providers": {
                     "codex": {
                         "auth_check": "codex-auth",
+                        "api_key_env": None,
                         "command": "codex",
                         "enabled": True,
                         "endpoint": None,
+                        "endpoint_env": None,
+                        "model": None,
                         "subscription_check": None,
+                        "timeout": 60.0,
                     }
                 },
                 "public_providers": ["claude", "codex"],

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import sys
 import uuid
 from pathlib import Path
@@ -9,6 +10,7 @@ from typing import Sequence, TextIO
 
 from .adapters import AdapterError, CodexCliAdapter, execute_fake_run
 from .config import ConfigError, ProviderSettings, Settings, load_settings
+from .openai_compatible import OpenAICompatibleAdapter
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
@@ -32,12 +34,17 @@ def build_parser() -> argparse.ArgumentParser:
     init = subparsers.add_parser("init", help="initialize AgentX settings")
     init.add_argument(
         "--profile",
-        choices=("agentx", "codex"),
+        choices=("agentx", "codex", "private-openai-compatible"),
         default="agentx",
         help="settings profile to write",
     )
     init.add_argument("--force", action="store_true", help="overwrite an existing settings file")
     init.add_argument("--codex-command", default="codex", help="Codex command for the codex profile")
+    init.add_argument("--endpoint", default=None, help="OpenAI-compatible base URL for the private provider profile")
+    init.add_argument("--endpoint-env", default=None, help="environment variable containing the OpenAI-compatible base URL")
+    init.add_argument("--model", default=None, help="model ID for the private provider profile")
+    init.add_argument("--api-key-env", default=None, help="environment variable containing the private provider API key")
+    init.add_argument("--timeout", type=float, default=60.0, help="private provider request timeout in seconds")
 
     interactive = subparsers.add_parser(
         "interactive",
@@ -170,6 +177,11 @@ def run(
             args.profile,
             args.force,
             args.codex_command,
+            args.endpoint,
+            args.endpoint_env,
+            args.model,
+            args.api_key_env,
+            args.timeout,
             settings,
             args.json,
             stdout,
@@ -230,9 +242,9 @@ def run(
             requested_provider=args.provider,
             settings=settings,
         )
-        if provider not in {"auto", "codex", "fake-local"}:
+        if provider not in {"auto", "codex", "private-openai-compatible", "fake-local"}:
             stderr.write(
-                f"agentx: plan provider '{provider}' is not supported in this phase; use codex or fake-local.\n"
+                f"agentx: plan provider '{provider}' is not supported; use codex, private-openai-compatible, or fake-local.\n"
             )
             return 2
         return _plan(
@@ -381,10 +393,10 @@ def _interactive(
             continue
 
         session_id = f"interactive-{uuid.uuid4().hex[:12]}"
-        if selected_provider == "codex":
+        if selected_provider in {"codex", "private-openai-compatible"}:
             _plan(
                 prompt,
-                "codex",
+                selected_provider,
                 None,
                 session_id,
                 ".",
@@ -442,6 +454,11 @@ def _init(
     profile: str,
     force: bool,
     codex_command: str,
+    endpoint: str | None,
+    endpoint_env: str | None,
+    model: str | None,
+    api_key_env: str | None,
+    timeout: float,
     settings,
     json_output: bool,
     stdout: TextIO,
@@ -452,6 +469,11 @@ def _init(
             profile,
             base=settings,
             codex_command=codex_command,
+            endpoint=endpoint,
+            endpoint_env=endpoint_env,
+            model=model,
+            api_key_env=api_key_env,
+            timeout=timeout,
         )
         store = SettingsStore(settings.paths)
         if store.path.exists() and not force:
@@ -519,6 +541,8 @@ def _resolve_plan_provider(*, fake: bool, requested_provider: str, settings) -> 
     public_providers = set(settings.public_providers)
     if "fake-local" in public_providers and "codex" not in public_providers:
         return "fake-local"
+    if "codex" not in public_providers and settings.private_provider:
+        return settings.private_provider
     return "codex"
 
 
@@ -527,6 +551,11 @@ def _settings_for_profile(
     *,
     base,
     codex_command: str,
+    endpoint: str | None,
+    endpoint_env: str | None,
+    model: str | None,
+    api_key_env: str | None,
+    timeout: float,
 ) -> Settings:
     if profile == "agentx":
         return Settings(
@@ -544,7 +573,29 @@ def _settings_for_profile(
             external_max_classification=base.external_max_classification,
             providers={"codex": ProviderSettings(command=codex_command)},
         )
-    raise ConfigError("init profile must be 'agentx' or 'codex'.")
+    if profile == "private-openai-compatible":
+        if not endpoint and not endpoint_env:
+            raise ConfigError(
+                "private-openai-compatible profile requires --endpoint or --endpoint-env."
+            )
+        if not model:
+            raise ConfigError("private-openai-compatible profile requires --model.")
+        return Settings(
+            paths=base.paths,
+            public_providers=(),
+            private_provider="private-openai-compatible",
+            external_max_classification=base.external_max_classification,
+            providers={
+                "private-openai-compatible": ProviderSettings(
+                    endpoint=endpoint,
+                    endpoint_env=endpoint_env,
+                    model=model,
+                    api_key_env=api_key_env,
+                    timeout=timeout,
+                )
+            },
+        )
+    raise ConfigError("init profile must be 'agentx', 'codex', or 'private-openai-compatible'.")
 
 
 def _plan(
@@ -566,7 +617,7 @@ def _plan(
             provider_statuses = None
             adapter = None
             scoped_source_root = None
-        else:
+        elif provider == "codex":
             run_provider = "codex"
             provider_statuses = ProviderRegistry(settings=settings).list_statuses()
             codex_status = next(
@@ -590,6 +641,51 @@ def _plan(
                 command=command,
                 cwd=scoped_workspace,
                 extra_args=("-C", str(scoped_workspace)),
+            )
+            scoped_source_root = Path(source_root)
+        elif provider == "private-openai-compatible":
+            run_provider = provider
+            provider_statuses = ProviderRegistry(settings=settings).list_statuses()
+            provider_status = next(
+                (status for status in provider_statuses if status.id == provider),
+                None,
+            )
+            if provider_status is None or not provider_status.enabled:
+                reason = "not registered" if provider_status is None else provider_status.reason
+                stderr.write(f"agentx: provider '{provider}' is not available: {reason}\n")
+                return 2
+            provider_settings = settings.providers.get(provider)
+            endpoint = (
+                provider_settings.endpoint
+                if provider_settings is not None
+                else None
+            ) or (
+                os.environ.get(provider_settings.endpoint_env)
+                if provider_settings is not None and provider_settings.endpoint_env
+                else None
+            )
+            if provider_settings is None or not endpoint:
+                stderr.write(
+                    f"agentx: provider '{provider}' requires an endpoint or endpoint environment variable.\n"
+                )
+                return 2
+            if not provider_settings.model:
+                stderr.write(f"agentx: provider '{provider}' requires a model setting.\n")
+                return 2
+            api_key = (
+                os.environ.get(provider_settings.api_key_env)
+                if provider_settings.api_key_env
+                else None
+            )
+            adapter = OpenAICompatibleAdapter(
+                base_url=endpoint,
+                model=provider_settings.model,
+                api_key=api_key,
+                timeout=provider_settings.timeout,
+                provider_id=provider,
+                context_root=(
+                    SessionStore(settings.paths).path_for_session(session_id) / "workspace"
+                ).resolve(),
             )
             scoped_source_root = Path(source_root)
 

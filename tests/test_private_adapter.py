@@ -108,6 +108,7 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         request = self.server.requests[0]
         self.assertEqual("/v1/chat/completions", request["path"])
         self.assertEqual("Bearer test-secret-key", request["headers"].get("Authorization"))
+        self.assertEqual("true", request["headers"].get("Ngrok-Skip-Browser-Warning"))
         payload = request["json"]
         self.assertEqual("local-coder", payload["model"])
         self.assertFalse(payload["stream"])
@@ -128,6 +129,33 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
 
         self.assertEqual("success", result.status)
         self.assertNotIn("Authorization", self.server.requests[0]["headers"])
+
+    def test_context_contents_are_bounded_to_policy_included_paths(self):
+        context_root = self.fixture_root / "workspace"
+        context_root.mkdir()
+        (context_root / "README.md").write_text("visible implementation details", encoding="utf-8")
+        (context_root / "secret.txt").write_text("do-not-send-this-secret", encoding="utf-8")
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            context_root=context_root,
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Review the visible file",
+                    provider="private-openai-compatible",
+                    context_paths=("README.md", "secret.txt"),
+                ),
+                context_map={"included_paths": ["README.md"], "excluded_paths": ["secret.txt"]},
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        user_content = self.server.requests[0]["json"]["messages"][1]["content"]
+        self.assertIn("visible implementation details", user_content)
+        self.assertNotIn("do-not-send-this-secret", user_content)
 
     def test_http_error_returns_failure_result_without_response_body_or_api_key(self):
         self.server.response_status = 503

@@ -1,5 +1,6 @@
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from agentx.config import AgentXPaths, ProviderSettings, Settings
 from agentx.providers import ProviderDefinition, ProviderRegistry
@@ -139,6 +140,25 @@ class ProviderRegistryTests(unittest.TestCase):
         self.assertFalse(statuses[0].enabled)
         self.assertEqual("disabled_unhealthy", statuses[0].reason)
         self.assertEqual({"endpoint": False}, statuses[0].checks)
+
+    def test_private_endpoint_can_be_loaded_from_environment(self):
+        registry = ProviderRegistry(
+            [ProviderDefinition("private", "Private", "openai_compatible", None, public=False)],
+            settings=settings(
+                {
+                    "private": ProviderSettings(
+                        endpoint_env="AGENTX_TEST_ENDPOINT",
+                    )
+                }
+            ),
+            endpoint_check=lambda endpoint: endpoint == "http://127.0.0.1:8000/v1",
+        )
+
+        with mock.patch.dict("os.environ", {"AGENTX_TEST_ENDPOINT": "http://127.0.0.1:8000/v1"}):
+            statuses = registry.list_statuses()
+
+        self.assertTrue(statuses[0].enabled)
+        self.assertEqual("http://127.0.0.1:8000/v1", statuses[0].endpoint)
 
 
 if __name__ == "__main__":

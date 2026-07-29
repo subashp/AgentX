@@ -8,7 +8,7 @@ with ROCm and exposes three client surfaces through one loopback-only gateway.
 | Web UI | `/` | Persistent named chats, summaries, and user memory |
 | External OpenAI-compatible client | `/v1/*` | Stateless; the client sends its own messages |
 | Machine client | `/api/machine-chat` | One persistent shared machine conversation per user |
-| Future AgentX CLI | `http://127.0.0.1:8000/v1` | Stateless OpenAI-compatible adapter for now |
+| AgentX CLI | `http://127.0.0.1:8000/v1` | Stateless OpenAI-compatible plan adapter |
 
 `vLLM` itself is intentionally stateless. The gateway persists chat state in a
 local SQLite database and reconstructs a bounded model prompt from a session
@@ -95,16 +95,23 @@ replace the request-supplied `user_id` before public use.
 
 ## AgentX integration
 
-AgentX already has an OpenAI-compatible private-provider adapter. The example
-settings file uses the gateway's local `/v1` endpoint. This gives AgentX direct
-model access today; wiring AgentX to the persistent machine-session endpoint is
-future work because that endpoint has a deliberately different session API.
+AgentX can use the gateway's stateless `/v1` endpoint directly. Configure the
+provider profile from the checkout or point it at the active ngrok tunnel:
 
 ```bash
 cp example-agentx-settings.json /path/outside/the/repository/agentx-settings.json
 export AGENTX_SETTINGS=/path/outside/the/repository/agentx-settings.json
 agentx providers list
+agentx plan --provider private-openai-compatible "review the current task"
 ```
+
+For a tunnel that changes after restart, configure `--endpoint-env
+AGENTX_QWEN_ENDPOINT` once and update that environment variable instead of
+rewriting the settings file.
+
+The persistent `/api/machine-chat` endpoint remains a separate chat surface;
+AgentX uses `/v1/chat/completions` so each coding run has its own stateless
+request and local audit artifacts.
 
 ## Operational notes
 

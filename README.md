@@ -17,8 +17,8 @@ backends are modeled as adapters behind the same routing and artifact contracts.
 The repository includes a reproducible AMD Halo/ROCm vLLM deployment under
 [`deploy/halo`](deploy/halo/). It launches Qwen3-14B locally, provides a
 persistent browser chat UI, proxies the OpenAI-compatible API for external
-clients, and reserves a shared machine conversation endpoint for future AgentX
-CLI integration. See [the Halo deployment guide](deploy/halo/README.md) for
+clients, and provides a shared machine conversation endpoint separate from
+AgentX's stateless coding-run integration. See [the Halo deployment guide](deploy/halo/README.md) for
 hardware prerequisites, startup, client endpoints, and security constraints.
 
 ## Quickstart
@@ -71,9 +71,10 @@ python -m agentx --provider claude
 
 Inside the session, enter a task at the `agentx[provider]>` prompt. Use
 `/provider auto`, `/providers`, `/help`, or `/quit` to control the session.
-Codex and the deterministic `fake-local` provider run their currently exposed
-plan workflows. Other providers currently return routing explanations until
-their live adapters are exposed through the public CLI.
+Codex, configured OpenAI-compatible endpoints, and the deterministic
+`fake-local` provider run their exposed plan workflows. Other providers
+currently return routing explanations until their live adapters are exposed
+through the public CLI.
 
 ## Provider Usage
 
@@ -115,9 +116,38 @@ supported.
 
 ### Self-hosted models, such as Qwen3-Coder
 
-Self-hosted models can be represented through an OpenAI-compatible `/v1` chat
-endpoint. Configure the endpoint in an AgentX settings document, keeping the
-file and any authentication material outside the source checkout:
+Self-hosted models such as the Halo Qwen/vLLM deployment can be used through
+the OpenAI-compatible `/v1` chat endpoint. Configure the endpoint and model
+from inside AgentX. The endpoint may be local or a temporary remote tunnel;
+do not commit a changing ngrok URL to the repository:
+
+```sh
+python -m agentx init \
+  --profile private-openai-compatible \
+  --endpoint http://127.0.0.1:8000/v1 \
+  --model Qwen/Qwen3-14B \
+  --timeout 900 \
+  --force
+```
+
+For a current ngrok tunnel, replace the endpoint with the active tunnel URL.
+Because the free ngrok URL changes after a restart, you can keep the profile
+stable and put the changing URL in an environment variable instead:
+
+```sh
+python -m agentx init \
+  --profile private-openai-compatible \
+  --endpoint-env AGENTX_QWEN_ENDPOINT \
+  --model Qwen/Qwen3-14B \
+  --timeout 900 \
+  --force
+```
+
+Set `AGENTX_QWEN_ENDPOINT` to either `http://127.0.0.1:8000/v1` or the
+current `https://<current-tunnel>.ngrok-free.app/v1` value before invoking
+AgentX. `--endpoint` takes precedence when both are configured.
+
+The equivalent settings document, kept outside the source checkout, is:
 
 ```json
 {
@@ -127,6 +157,8 @@ file and any authentication material outside the source checkout:
   "providers": {
     "private-openai-compatible": {
       "endpoint": "http://127.0.0.1:8000/v1",
+      "model": "Qwen/Qwen3-14B",
+      "timeout": 900,
       "enabled": true
     }
   }
@@ -138,14 +170,26 @@ Point AgentX at that settings file and inspect the endpoint and policy route:
 ```sh
 export AGENTX_SETTINGS=/path/to/agentx-settings.json
 python -m agentx providers list
-python -m agentx route --provider private-openai-compatible --explain \
+python -m agentx plan --provider private-openai-compatible \
   "summarize the private planner implementation"
+python -m agentx --provider private-openai-compatible
 ```
 
 The endpoint must already be running; AgentX does not provision model weights,
-start a Qwen3-Coder server, or manage cloud compute in this release. The
-OpenAI-compatible adapter exists as a provider contract, but live private
-endpoint execution is not yet exposed through the public CLI.
+start a Qwen3-Coder server, or manage cloud compute. If the endpoint requires
+authentication, configure only the name of an environment variable with
+`--api-key-env`; the secret itself is read at runtime and is not written to
+settings or run artifacts:
+
+```sh
+python -m agentx init \
+  --profile private-openai-compatible \
+  --endpoint https://<current-tunnel>.ngrok-free.app/v1 \
+  --model Qwen/Qwen3-14B \
+  --api-key-env AGENTX_QWEN_API_KEY \
+  --timeout 900 \
+  --force
+```
 
 ### Automatic routing across providers
 
@@ -177,6 +221,8 @@ The public CLI currently supports:
   plan workflow and write local artifacts.
 - `plan --provider codex`: run a live Codex CLI plan against a scoped read-only
   workspace built from policy-visible context.
+- `plan --provider private-openai-compatible`: run a live plan through a
+  configured local or remote OpenAI-compatible endpoint.
 - `execute --fake`: run the deterministic offline execute workflow, validate any
   adapter patch output, and write local artifacts without applying source
   mutations.
@@ -283,6 +329,8 @@ resolved settings include:
   "providers": {
     "private-openai-compatible": {
       "endpoint": "https://example.invalid",
+      "model": "Qwen/Qwen3-14B",
+      "timeout": 900,
       "enabled": true
     }
   }
@@ -297,6 +345,8 @@ The CLI can write common profiles:
 ```sh
 python -m agentx init
 python -m agentx init --profile codex --codex-command codex --force
+python -m agentx init --profile private-openai-compatible \
+  --endpoint http://127.0.0.1:8000/v1 --model Qwen/Qwen3-14B --force
 ```
 
 `init` refuses to overwrite an existing settings file unless `--force` is
