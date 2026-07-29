@@ -346,6 +346,8 @@ def _interactive(
             stdout.write(f"  {index}. {status.id} - {status.display_name} ({availability})\n")
         stdout.write("Select provider [auto]: ")
         choice = stdin.readline().strip()
+        if choice.lower() in {"/quit", "/exit", ":q"}:
+            return 0
         if choice.isdigit():
             choice_index = int(choice)
             if choice_index == 1:

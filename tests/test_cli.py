@@ -243,6 +243,37 @@ class CliTests(unittest.TestCase):
         self.assertIn("fake-local", stdout.getvalue())
         self.assertIn("agentx[auto]>", stdout.getvalue())
 
+    def test_interactive_can_quit_at_initial_provider_selection(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        settings = Settings(
+            paths=AgentXPaths(
+                root=Path("tests") / ".tmp_cli_interactive_initial_quit",
+                settings=Path("tests") / ".tmp_cli_interactive_initial_quit" / "settings.json",
+                sessions=Path("tests") / ".tmp_cli_interactive_initial_quit" / "sessions",
+                memories=Path("tests") / ".tmp_cli_interactive_initial_quit" / "memories",
+                auth=Path("tests") / ".tmp_cli_interactive_initial_quit" / "auth",
+            )
+        )
+        statuses = (
+            ProviderStatus(
+                id="fake-local",
+                display_name="AgentX Fake Local",
+                kind="builtin",
+                enabled=True,
+                reason="available",
+            ),
+        )
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                code = cli.run([], stdout, stderr, io.StringIO("/quit\n"))
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertNotIn("unknown provider", stdout.getvalue() + stderr.getvalue())
+
     def test_interactive_provider_option_runs_selected_codex_prompt(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
