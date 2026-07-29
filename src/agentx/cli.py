@@ -942,9 +942,8 @@ def _format_plan(
             stderr_text = str(output_event.get("stderr") or "").strip()
             if stdout_text:
                 lines.extend(("", stdout_text))
-            if stderr_text:
-                label = "provider error" if result.get("status") != "success" else "provider stderr"
-                lines.extend(("", f"{label}:", stderr_text))
+            if stderr_text and result.get("status") != "success":
+                lines.extend(("", "provider error:", stderr_text))
         outcome = result.get("outcome", {})
         if (
             result.get("provider_id") == "private-openai-compatible"

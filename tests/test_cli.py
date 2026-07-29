@@ -387,7 +387,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("provider 'claude' is unavailable", stderr.getvalue())
         self.assertIn("agentx[codex]>", stdout.getvalue())
 
-    def test_plan_formatter_surfaces_provider_stdout_and_stderr(self):
+    def test_plan_formatter_surfaces_provider_stdout_but_suppresses_success_stderr(self):
         rendered = cli._format_plan(
             {
                 "root": "state/session",
@@ -407,8 +407,8 @@ class CliTests(unittest.TestCase):
         )
 
         self.assertIn("Codex response", rendered)
-        self.assertIn("provider stderr:", rendered)
-        self.assertIn("Codex warning", rendered)
+        self.assertNotIn("provider stderr:", rendered)
+        self.assertNotIn("Codex warning", rendered)
 
     def test_plan_formatter_surfaces_private_response_and_dimmed_thinking(self):
         rendered = cli._format_plan(
