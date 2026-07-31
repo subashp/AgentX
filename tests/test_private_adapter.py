@@ -436,6 +436,18 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertEqual(503, result.outcome["http_status"])
         self.assertNotIn("test-secret-key", json.dumps(result.as_dict()))
 
+    def test_http_error_includes_short_provider_diagnostic(self):
+        self.server.response_status = 400
+        self.server.response_body = {
+            "error": {"message": "auto tool choice requires tool calling to be enabled"}
+        }
+        adapter = OpenAICompatibleAdapter(base_url=self.base_url, model="local-coder")
+
+        result = adapter.execute(AdapterRequest(run=AgentRun(prompt="Use a tool")))
+
+        self.assertEqual("failure", result.status)
+        self.assertIn("auto tool choice requires tool calling to be enabled", result.outcome["summary"])
+
     def test_malformed_json_returns_failure_result(self):
         self.server.response_body = "not json"
         adapter = OpenAICompatibleAdapter(base_url=self.base_url, model="local-coder")

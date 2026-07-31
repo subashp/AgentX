@@ -60,6 +60,12 @@ The first launch pulls `docker.io/vllm/vllm-openai-rocm:latest` and downloads
 `Qwen/Qwen3-14B` into `~/models/vllm-huggingface`. Set `HF_TOKEN` in your own
 shell if Hugging Face authentication is required; never put it in this repo.
 
+The launcher enables vLLM automatic tool calling by default with the Qwen3
+parser. AgentX uses this for read-only workspace inspection and private-model
+subagents. If you intentionally need a plain chat-only server, set
+`ENABLE_TOOL_CALLING=0` before starting it; AgentX tool calls will not work in
+that mode.
+
 `start.sh` starts the existing vLLM and gateway scripts, waits for
 `/v1/models`, and updates the external AgentX settings with the model ID that
 the gateway advertises. It records logs and process state outside the
@@ -174,6 +180,14 @@ agentx init \
 The free ngrok URL can change after a restart, so update the external AgentX
 settings with the current URL. Do not commit the URL, credentials, or runtime
 settings to this repository.
+
+After updating the launcher or upgrading the vLLM image, restart the model
+service so the tool-calling flags take effect:
+
+```bash
+./deploy/halo/stop.sh
+./deploy/halo/start.sh
+```
 
 ## Operational notes
 

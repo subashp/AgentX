@@ -12,6 +12,9 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 # Leave headroom for ROCm/vLLM allocations and host desktop usage.
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.88}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
+ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-1}"
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3}"
+REASONING_PARSER="${REASONING_PARSER:-qwen3}"
 
 AUTH_ARGS=()
 if [[ "${VLLM_NO_AUTH:-0}" != "1" ]]; then
@@ -21,7 +24,12 @@ fi
 
 REASONING_ARGS=()
 if [[ "${ENABLE_REASONING:-0}" == "1" ]]; then
-  REASONING_ARGS=(--reasoning-parser deepseek_r1)
+  REASONING_ARGS=(--reasoning-parser "$REASONING_PARSER")
+fi
+
+TOOL_CALLING_ARGS=()
+if [[ "$ENABLE_TOOL_CALLING" == "1" ]]; then
+  TOOL_CALLING_ARGS=(--enable-auto-tool-choice --tool-call-parser "$TOOL_CALL_PARSER")
 fi
 
 for device in /dev/kfd /dev/dri; do
@@ -48,4 +56,5 @@ exec "$ENGINE" run --rm --name agentx-qwen-vllm \
   --kv-cache-dtype "$KV_CACHE_DTYPE" \
   --enforce-eager \
   "${REASONING_ARGS[@]}" \
+  "${TOOL_CALLING_ARGS[@]}" \
   "${AUTH_ARGS[@]}"

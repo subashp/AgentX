@@ -127,7 +127,7 @@ class OpenAICompatibleChatClient:
         except urllib.error.HTTPError as exc:
             raise OpenAICompatibleClientError(
                 "http_error",
-                f"OpenAI-compatible endpoint returned HTTP {exc.code}.",
+                _http_error_message(exc),
                 status_code=exc.code,
             ) from exc
         except TimeoutError as exc:
@@ -204,7 +204,7 @@ class OpenAICompatibleChatClient:
         except urllib.error.HTTPError as exc:
             raise OpenAICompatibleClientError(
                 "http_error",
-                f"OpenAI-compatible endpoint returned HTTP {exc.code}.",
+                _http_error_message(exc),
                 status_code=exc.code,
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
@@ -1026,6 +1026,35 @@ def _safe_url_error_reason(exc: urllib.error.URLError) -> str:
     if isinstance(reason, str):
         return reason
     return type(reason).__name__
+
+
+def _http_error_message(exc: urllib.error.HTTPError) -> str:
+    """Preserve a short provider diagnostic without echoing the request."""
+
+    detail = ""
+    try:
+        raw_body = exc.read(4096)
+        decoded = raw_body.decode("utf-8", errors="replace")
+        payload = json.loads(decoded)
+        if isinstance(payload, Mapping):
+            error = payload.get("error")
+            if isinstance(error, Mapping):
+                detail = _extract_text_value(error.get("message") or error.get("detail")) or ""
+            elif isinstance(error, str):
+                detail = error.strip()
+            if not detail:
+                detail = _extract_text_value(payload.get("message") or payload.get("detail")) or ""
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        detail = ""
+    detail = " ".join(detail.split())[:400]
+    if any(
+        marker in detail.casefold()
+        for marker in ("secret", "token", "api_key", "authorization", "password", "credential")
+    ):
+        detail = ""
+    if detail:
+        return f"OpenAI-compatible endpoint returned HTTP {exc.code}: {detail}."
+    return f"OpenAI-compatible endpoint returned HTTP {exc.code}."
 
 
 __all__ = [
