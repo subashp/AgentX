@@ -8,11 +8,19 @@ import uuid
 from pathlib import Path
 from typing import Sequence, TextIO
 
-from .adapters import AdapterError, CliPlanAdapter, CodexCliAdapter, execute_fake_run
+from .adapters import (
+    AdapterError,
+    AdapterRequest,
+    CliPlanAdapter,
+    CodexCliAdapter,
+    execute_adapter_run,
+    execute_fake_run,
+)
 from .config import ConfigError, ProviderSettings, Settings, load_settings
 from .openai_compatible import OpenAICompatibleAdapter
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
-from .tools import ReadOnlyWorkspaceTools, ToolError
+from .subagents import SubagentManager, SubagentTask, SubagentTools
+from .tools import CompositeToolExecutor, ReadOnlyWorkspaceTools, ToolError
 from .workspace import WorkspaceError, normalize_scoped_path
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
@@ -803,6 +811,22 @@ def _plan(
                 else None
             )
             scoped_source_root = Path(source_root)
+            read_only_tools = ReadOnlyWorkspaceTools(
+                scoped_source_root,
+                allowed_paths=context_paths,
+            )
+            subagent_manager = SubagentManager(
+                parent_session_id=session_id,
+                runner=_PrivateSubagentRunner(
+                    base_url=endpoint,
+                    model=provider_settings.model,
+                    api_key=api_key,
+                    timeout=provider_settings.timeout,
+                    provider_id=provider,
+                    source_root=scoped_source_root,
+                    session_store=SessionStore(settings.paths),
+                ),
+            )
             adapter = OpenAICompatibleAdapter(
                 base_url=endpoint,
                 model=provider_settings.model,
@@ -821,9 +845,9 @@ def _plan(
                     if not json_output
                     else None
                 ),
-                tool_executor=ReadOnlyWorkspaceTools(
-                    scoped_source_root,
-                    allowed_paths=context_paths,
+                tool_executor=CompositeToolExecutor(
+                    read_only_tools,
+                    SubagentTools(subagent_manager),
                 ),
             )
 
@@ -867,6 +891,88 @@ def _plan(
         ),
     )
     return code
+
+
+class _PrivateSubagentRunner:
+    """Run child tasks through isolated private-provider adapter instances."""
+
+    def __init__(
+        self,
+        *,
+        base_url: str,
+        model: str,
+        api_key: str | None,
+        timeout: float,
+        provider_id: str,
+        source_root: Path,
+        session_store: SessionStore,
+    ) -> None:
+        self.base_url = base_url
+        self.model = model
+        self.api_key = api_key
+        self.timeout = timeout
+        self.provider_id = provider_id
+        self.source_root = source_root
+        self.session_store = session_store
+
+    def run(
+        self,
+        task: SubagentTask,
+        *,
+        session_id: str,
+        depth: int,
+    ) -> dict[str, object]:
+        if depth != 1:
+            raise ToolError("private subagent runner only accepts depth-one children")
+        provider = self.provider_id if task.provider == "auto" else task.provider
+        if provider != self.provider_id:
+            raise ToolError(
+                f"provider '{provider}' is not available to this private subagent runner"
+            )
+        child_run = AgentRun(
+            prompt=task.prompt,
+            mode=task.mode,
+            provider=provider,
+            model_tier=task.model_tier,
+            context_paths=task.context_paths,
+            task_hints=task.task_hints,
+        )
+        child_tools = ReadOnlyWorkspaceTools(
+            self.source_root,
+            allowed_paths=task.context_paths,
+        )
+        child_adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model=self.model,
+            api_key=self.api_key,
+            timeout=self.timeout,
+            provider_id=self.provider_id,
+            context_root=self.source_root,
+            stream=False,
+            tool_executor=child_tools,
+        )
+        stored = execute_adapter_run(
+            session_store=self.session_store,
+            session_id=session_id,
+            run=child_run,
+            adapter=child_adapter,
+            context_map={
+                "schema_version": 1,
+                "requested_paths": list(task.context_paths),
+                "included_paths": list(task.context_paths),
+                "excluded_paths": [],
+            },
+        )
+        outcome = dict(stored.result.outcome)
+        return {
+            "status": stored.result.status,
+            "summary": str(outcome.get("summary", "")),
+            "response": outcome.get("response"),
+            "provider_id": stored.result.provider_id,
+            "model_id": stored.result.model_id,
+            "artifact_root": str(stored.root),
+            "result": stored.result.as_dict(),
+        }
 
 
 def _execute(

@@ -8,13 +8,14 @@ from pathlib import Path
 
 from agentx.adapters import AdapterError, AdapterRequest, execute_adapter_run
 from agentx.config import AgentXPaths
+from agentx.cli import _PrivateSubagentRunner
 from agentx.openai_compatible import (
     OpenAICompatibleAdapter,
     OpenAICompatibleChatClient,
 )
 from agentx.routing import AgentRun
 from agentx.store import RUN_ARTIFACT_FILES, SessionStore
-from agentx.subagents import SubagentManager, SubagentTools
+from agentx.subagents import SubagentManager, SubagentTask, SubagentTools
 from agentx.tools import CompositeToolExecutor, ReadOnlyWorkspaceTools
 
 
@@ -360,6 +361,37 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertEqual(1, runner.calls[0][2])
         child_message = self.server.requests[1]["json"]["messages"][3]["content"]
         self.assertIn("Child completed: Inspect README", child_message)
+
+    def test_private_subagent_runner_writes_isolated_child_artifacts(self):
+        context_root = self.fixture_root / "child-workspace"
+        context_root.mkdir()
+        (context_root / "README.md").write_text("child-visible context", encoding="utf-8")
+        runner = _PrivateSubagentRunner(
+            base_url=self.base_url,
+            model="local-coder",
+            api_key=None,
+            timeout=5.0,
+            provider_id="private-openai-compatible",
+            source_root=context_root,
+            session_store=SessionStore(self.make_paths()),
+        )
+
+        result = runner.run(
+            SubagentTask(
+                prompt="Summarize README",
+                context_paths=("README.md",),
+                provider="private-openai-compatible",
+            ),
+            session_id="parent-subagent-01",
+            depth=1,
+        )
+
+        self.assertEqual("success", result["status"])
+        artifact_root = Path(result["artifact_root"])
+        self.assertTrue((artifact_root / "outcome.json").exists())
+        payload = self.server.requests[0]["json"]
+        self.assertNotIn("subagent_create", json.dumps(payload))
+        self.assertIn("child-visible context", payload["messages"][1]["content"])
 
     def test_context_contents_are_bounded_to_policy_included_paths(self):
         context_root = self.fixture_root / "workspace"

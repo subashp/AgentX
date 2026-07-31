@@ -100,6 +100,13 @@ diffs. When the model requests one, AgentX executes it locally and sends the
 bounded result back through the provider's tool-call loop. Selected `/context`
 paths become the tool scope; sensitive files, credentials, repository state,
 and traversal paths remain blocked.
+
+Private-provider runs can also create and inspect child agents through
+`subagent_create`, `subagent_list`, and `subagent_get`. AgentX allows at most
+ten children per parent. Each child gets its own session/artifact directory,
+provider interaction, and explicitly selected context, then returns a summary
+to the parent. Children run at depth one and do not receive subagent tools, so
+they cannot create grandchildren.
 Codex, Claude Code, Kiro CLI, configured OpenAI-compatible endpoints, and the
 deterministic `fake-local` provider use the same read-only plan boundary and
 local AgentX audit artifacts.

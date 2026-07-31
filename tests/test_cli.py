@@ -1094,6 +1094,10 @@ class CliTests(unittest.TestCase):
             self.assertEqual("Qwen/Qwen3-14B", adapter.model)
             self.assertEqual("test-key", adapter.api_key)
             self.assertEqual(180.0, adapter.timeout)
+            self.assertIn(
+                "subagent_create",
+                {spec.name for spec in adapter.tool_executor.specs},
+            )
         finally:
             if root.exists():
                 shutil.rmtree(root)
