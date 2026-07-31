@@ -77,7 +77,7 @@ _MAX_SEARCH_RESULTS = 200
 
 READ_ONLY_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
-        "workspace.tree",
+        "workspace_tree",
         "List safe files and directories in the scoped workspace.",
         {
             "type": "object",
@@ -88,7 +88,7 @@ READ_ONLY_TOOL_SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
-        "workspace.read",
+        "workspace_read",
         "Read a bounded range from one safe UTF-8 text file.",
         {
             "type": "object",
@@ -102,7 +102,7 @@ READ_ONLY_TOOL_SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
-        "workspace.search",
+        "workspace_search",
         "Search safe text files for a literal string.",
         {
             "type": "object",
@@ -116,12 +116,12 @@ READ_ONLY_TOOL_SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
-        "git.status",
+        "git_status",
         "Show safe, read-only Git status for the scoped workspace.",
         {"type": "object", "properties": {}},
     ),
     ToolSpec(
-        "git.diff",
+        "git_diff",
         "Show a bounded read-only diff for explicitly scoped paths.",
         {
             "type": "object",
@@ -137,7 +137,7 @@ READ_ONLY_TOOL_SPECS: tuple[ToolSpec, ...] = (
 
 CONTROLLED_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
-        "workspace.patch",
+        "workspace_patch",
         "Apply a unified diff to explicitly approved workspace paths after user approval.",
         {
             "type": "object",
@@ -148,7 +148,7 @@ CONTROLLED_TOOL_SPECS: tuple[ToolSpec, ...] = (
         },
     ),
     ToolSpec(
-        "shell.exec",
+        "shell_exec",
         "Run an explicitly approved executable argv in the scoped workspace without a shell.",
         {
             "type": "object",
@@ -180,13 +180,20 @@ class ReadOnlyWorkspaceTools:
 
     def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
         args = dict(arguments or {})
+        name = {
+            "workspace.tree": "workspace_tree",
+            "workspace.read": "workspace_read",
+            "workspace.search": "workspace_search",
+            "git.status": "git_status",
+            "git.diff": "git_diff",
+        }.get(name, name)
         try:
             output = {
-                "workspace.tree": self.tree,
-                "workspace.read": self.read,
-                "workspace.search": self.search,
-                "git.status": self.git_status,
-                "git.diff": self.git_diff,
+                "workspace_tree": self.tree,
+                "workspace_read": self.read,
+                "workspace_search": self.search,
+                "git_status": self.git_status,
+                "git_diff": self.git_diff,
             }[name](args)
         except (KeyError, ToolError, OSError, ValueError) as exc:
             return ToolResult(name=name, ok=False, error=str(exc))
@@ -388,9 +395,9 @@ class ControlledWorkspaceTools(ReadOnlyWorkspaceTools):
         return READ_ONLY_TOOL_SPECS + CONTROLLED_TOOL_SPECS
 
     def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
-        if name == "workspace.patch":
+        if name in {"workspace.patch", "workspace_patch"}:
             return self.apply_patch(dict(arguments or {}))
-        if name == "shell.exec":
+        if name in {"shell.exec", "shell_exec"}:
             return self.exec_shell(dict(arguments or {}))
         return super().call(name, arguments)
 

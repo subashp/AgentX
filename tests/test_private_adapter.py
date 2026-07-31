@@ -269,7 +269,7 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         first_payload = self.server.requests[0]["json"]
         self.assertEqual("auto", first_payload["tool_choice"])
         self.assertEqual(
-            {"workspace.tree", "workspace.read", "workspace.search", "git.status", "git.diff"},
+            {"workspace_tree", "workspace_read", "workspace_search", "git_status", "git_diff"},
             {tool["function"]["name"] for tool in first_payload["tools"]},
         )
         second_messages = self.server.requests[1]["json"]["messages"]

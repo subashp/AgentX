@@ -442,7 +442,6 @@ class OpenAICompatibleAdapter:
                     {
                         "role": "tool",
                         "tool_call_id": call_id,
-                        "name": name,
                         "content": result.as_json(),
                     }
                 )
@@ -659,7 +658,7 @@ def _normalize_optional_secret(value: object, field_name: str) -> str:
     return normalized
 
 
-def _normalize_message(value: Mapping[str, str]) -> dict[str, str]:
+def _normalize_message(value: Mapping[str, object]) -> dict[str, object]:
     if not isinstance(value, Mapping):
         raise AdapterError("messages must contain mappings.")
     role = _normalize_non_empty_string(value.get("role"), "message.role")

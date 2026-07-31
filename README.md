@@ -84,7 +84,22 @@ agentx --provider claude
 ```
 
 Inside the session, enter a task at the `agentx[provider]>` prompt. Use
-`/provider auto`, `/providers`, `/help`, or `/quit` to control the session.
+`/provider auto`, `/providers`, `/context`, `/help`, or `/quit` to control the
+session. `/context` sets the relative files or directories that the next task
+may use; `/context clear` removes that selection:
+
+```text
+agentx[private-openai-compatible]> /context README.md src/agentx
+Context paths: README.md, src/agentx
+agentx[private-openai-compatible]> analyze the selected code
+```
+
+The private OpenAI-compatible adapter exposes bounded, read-only workspace
+tools for tree listing, file reads, literal search, Git status, and scoped Git
+diffs. When the model requests one, AgentX executes it locally and sends the
+bounded result back through the provider's tool-call loop. Selected `/context`
+paths become the tool scope; sensitive files, credentials, repository state,
+and traversal paths remain blocked.
 Codex, Claude Code, Kiro CLI, configured OpenAI-compatible endpoints, and the
 deterministic `fake-local` provider use the same read-only plan boundary and
 local AgentX audit artifacts.
@@ -94,6 +109,11 @@ response as it arrives. If the endpoint returns a separate reasoning/thinking
 field, it is shown in dim grey terminal text before the response. The complete
 response and reasoning are still saved in the run artifacts. `/quit` is the
 interactive exit command.
+
+Approval-gated patch and shell tool implementations are available as an
+explicit adapter boundary for controlled integrations. They are not enabled
+by default: patches require allowed paths and approval, while shell commands
+require approval and are executed as an argv list without a shell.
 
 If the private model endpoint is missing, AgentX prints a startup warning with
 the external settings-file path and an initialization command. The default
