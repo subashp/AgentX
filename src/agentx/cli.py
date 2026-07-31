@@ -12,10 +12,10 @@ from .adapters import AdapterError, CliPlanAdapter, CodexCliAdapter, execute_fak
 from .config import ConfigError, ProviderSettings, Settings, load_settings
 from .openai_compatible import OpenAICompatibleAdapter
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
+from .workspace import WorkspaceError, normalize_scoped_path
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
 from .store import SessionStore, SettingsStore, StoreError
-from .workspace import WorkspaceError
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -372,6 +372,8 @@ def _interactive(
             )
             return 2
 
+    context_paths: tuple[str, ...] = ()
+
     while True:
         stdout.write(f"\nagentx[{selected_provider}]> ")
         line = stdin.readline()
@@ -386,7 +388,7 @@ def _interactive(
             return 0
         if command in {"/help", "help"}:
             stdout.write(
-                "Commands: /provider [id|auto], /providers, /help, /quit. "
+                "Commands: /provider [id|auto], /providers, /context [clear|path...], /help, /quit. "
                 "Any other input is treated as a coding task.\n"
             )
             continue
@@ -414,6 +416,31 @@ def _interactive(
             selected_provider = requested
             stdout.write(f"Provider changed to {selected_provider}.\n")
             continue
+        if command == "/context" or command.startswith("/context "):
+            parts = prompt.split(maxsplit=1)
+            if len(parts) == 1:
+                if context_paths:
+                    stdout.write("Context paths:\n")
+                    stdout.writelines(f"  {path}\n" for path in context_paths)
+                else:
+                    stdout.write("Context paths: none.\n")
+                continue
+            requested_paths = parts[1].split()
+            if len(requested_paths) == 1 and requested_paths[0].lower() == "clear":
+                context_paths = ()
+                stdout.write("Context paths cleared.\n")
+                continue
+            try:
+                normalized_paths = tuple(
+                    dict.fromkeys(normalize_scoped_path(path) for path in requested_paths)
+                )
+            except WorkspaceError as exc:
+                stderr.write(f"agentx: invalid context path: {exc}\n")
+                continue
+            context_paths = normalized_paths
+            stdout.write("Context paths set:\n")
+            stdout.writelines(f"  {path}\n" for path in context_paths)
+            continue
 
         session_id = f"interactive-{uuid.uuid4().hex[:12]}"
         task_provider = selected_provider
@@ -427,7 +454,7 @@ def _interactive(
                 session_id,
                 ".",
                 None,
-                (),
+                context_paths,
                 settings,
                 False,
                 stdout,
@@ -442,7 +469,7 @@ def _interactive(
                 session_id,
                 ".",
                 None,
-                (),
+                context_paths,
                 settings,
                 False,
                 stdout,

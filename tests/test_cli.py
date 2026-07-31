@@ -435,6 +435,125 @@ class CliTests(unittest.TestCase):
         self.assertIn("provider 'claude' is unavailable", stderr.getvalue())
         self.assertIn("agentx[codex]>", stdout.getvalue())
 
+    def test_interactive_context_can_be_set_and_listed(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        settings = Settings(
+            paths=AgentXPaths(
+                root=Path("tests") / ".tmp_cli_interactive_context_list",
+                settings=Path("tests") / ".tmp_cli_interactive_context_list" / "settings.json",
+                sessions=Path("tests") / ".tmp_cli_interactive_context_list" / "sessions",
+                memories=Path("tests") / ".tmp_cli_interactive_context_list" / "memories",
+                auth=Path("tests") / ".tmp_cli_interactive_context_list" / "auth",
+            )
+        )
+        statuses = (ProviderStatus("fake-local", "AgentX Fake Local", "builtin", True, "available"),)
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                code = cli.run(
+                    ["interactive", "--provider", "fake-local"],
+                    stdout,
+                    stderr,
+                    io.StringIO("/context ./README.md src\\agentx README.md\n/context\n/quit\n"),
+                )
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertIn("Context paths set:\n  README.md\n  src/agentx\n", stdout.getvalue())
+        self.assertIn("Context paths:\n  README.md\n  src/agentx\n", stdout.getvalue())
+
+    def test_interactive_context_can_be_cleared(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_interactive_context_clear"
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            )
+        )
+        statuses = (ProviderStatus("fake-local", "AgentX Fake Local", "builtin", True, "available"),)
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                code = cli.run(
+                    ["interactive", "--provider", "fake-local"],
+                    stdout,
+                    stderr,
+                    io.StringIO("/context README.md\n/context clear\n/context\n/quit\n"),
+                )
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertIn("Context paths cleared.", stdout.getvalue())
+        self.assertIn("Context paths: none.", stdout.getvalue())
+
+    def test_interactive_context_rejects_parent_traversal(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_interactive_context_traversal"
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            )
+        )
+        statuses = (ProviderStatus("fake-local", "AgentX Fake Local", "builtin", True, "available"),)
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                code = cli.run(
+                    ["interactive", "--provider", "fake-local"],
+                    stdout,
+                    stderr,
+                    io.StringIO("/context ../secret.txt\n/context\n/quit\n"),
+                )
+
+        self.assertEqual(0, code)
+        self.assertIn("invalid context path", stderr.getvalue())
+        self.assertIn("Context paths: none.", stdout.getvalue())
+
+    def test_interactive_forwards_context_paths_to_plan(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_interactive_context_forward"
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            )
+        )
+        statuses = (ProviderStatus("fake-local", "AgentX Fake Local", "builtin", True, "available"),)
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                with mock.patch("agentx.cli._plan") as plan:
+                    code = cli.run(
+                        ["interactive", "--provider", "fake-local"],
+                        stdout,
+                        stderr,
+                        io.StringIO("/context README.md src\\agentx\nanalyze this\n/quit\n"),
+                    )
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual(("README.md", "src/agentx"), plan.call_args.args[6])
+        self.assertTrue(plan.call_args.kwargs["interactive_output"])
+
     def test_plan_formatter_surfaces_provider_stdout_but_suppresses_success_stderr(self):
         rendered = cli._format_plan(
             {
