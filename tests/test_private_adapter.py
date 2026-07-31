@@ -14,7 +14,8 @@ from agentx.openai_compatible import (
 )
 from agentx.routing import AgentRun
 from agentx.store import RUN_ARTIFACT_FILES, SessionStore
-from agentx.tools import ReadOnlyWorkspaceTools
+from agentx.subagents import SubagentManager, SubagentTools
+from agentx.tools import CompositeToolExecutor, ReadOnlyWorkspaceTools
 
 
 class PrivateAdapterFixtureTestCase(unittest.TestCase):
@@ -278,6 +279,87 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertEqual("call-tree-1", second_messages[3]["tool_call_id"])
         self.assertIn('"path": "README.md"', second_messages[3]["content"])
         self.assertEqual(40, result.cost["usage"]["total_tokens"])
+
+    def test_tool_loop_creates_child_and_returns_child_summary(self):
+        class FixtureRunner:
+            def __init__(self):
+                self.calls = []
+
+            def run(self, task, *, session_id, depth):
+                self.calls.append((task, session_id, depth))
+                return {
+                    "status": "success",
+                    "summary": f"Child completed: {task.prompt}",
+                    "artifact_root": f"tests/.tmp/{session_id}",
+                }
+
+        runner = FixtureRunner()
+        manager = SubagentManager(parent_session_id="parent", runner=runner)
+        tools = CompositeToolExecutor(
+            ReadOnlyWorkspaceTools(self.fixture_root),
+            SubagentTools(manager),
+        )
+        self.server.response_bodies = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-child-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "subagent_create",
+                                        "arguments": json.dumps(
+                                            {
+                                                "prompt": "Inspect README",
+                                                "context_paths": ["README.md"],
+                                            }
+                                        ),
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Child analysis is complete.",
+                        }
+                    }
+                ]
+            },
+        ]
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            tool_executor=tools,
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Delegate the README inspection",
+                    provider="private-openai-compatible",
+                )
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        self.assertEqual(["subagent_create"], result.outcome["tools_used"])
+        self.assertEqual("completed", manager.get("subagent-01").status)
+        self.assertEqual("README.md", runner.calls[0][0].context_paths[0])
+        self.assertEqual("parent-subagent-01", runner.calls[0][1])
+        self.assertEqual(1, runner.calls[0][2])
+        child_message = self.server.requests[1]["json"]["messages"][3]["content"]
+        self.assertIn("Child completed: Inspect README", child_message)
 
     def test_context_contents_are_bounded_to_policy_included_paths(self):
         context_root = self.fixture_root / "workspace"

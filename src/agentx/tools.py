@@ -31,6 +31,36 @@ class ToolExecutor(Protocol):
 ApprovalCallback = Callable[[str, Mapping[str, object]], bool]
 
 
+class CompositeToolExecutor:
+    """Compose disjoint tool providers behind one model-facing boundary."""
+
+    def __init__(self, *executors: ToolExecutor) -> None:
+        self._executors = tuple(executors)
+        specs: list[ToolSpec] = []
+        names: set[str] = set()
+        for executor in self._executors:
+            if not hasattr(executor, "specs") or not callable(getattr(executor, "call", None)):
+                raise ToolError("composite entries must provide specs and call()")
+            for spec in executor.specs:
+                if not isinstance(spec, ToolSpec):
+                    raise ToolError("composite entries must expose ToolSpec values")
+                if spec.name in names:
+                    raise ToolError(f"duplicate tool name: {spec.name}")
+                names.add(spec.name)
+                specs.append(spec)
+        self._specs = tuple(specs)
+
+    @property
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return self._specs
+
+    def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
+        for executor in self._executors:
+            if any(spec.name == name for spec in executor.specs):
+                return executor.call(name, arguments)
+        return ToolResult(name=name, ok=False, error="unknown tool")
+
+
 @dataclass(frozen=True)
 class ToolSpec:
     name: str
@@ -542,6 +572,7 @@ def _normalize_argv(value: object) -> tuple[str, ...]:
 
 __all__ = [
     "ApprovalCallback",
+    "CompositeToolExecutor",
     "CONTROLLED_TOOL_SPECS",
     "ControlledWorkspaceTools",
     "READ_ONLY_TOOL_SPECS",
