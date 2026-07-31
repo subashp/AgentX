@@ -8,9 +8,9 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Protocol
+from typing import Any, Callable, Protocol
 
-from .workspace import WorkspaceError, normalize_scoped_path
+from .workspace import WorkspaceError, normalize_scoped_path, validate_patch_paths
 
 
 class ToolError(ValueError):
@@ -26,6 +26,9 @@ class ToolExecutor(Protocol):
 
     def call(self, name: str, arguments: Mapping[str, object] | None = None) -> "ToolResult":
         """Execute one validated tool call and return a bounded result."""
+
+
+ApprovalCallback = Callable[[str, Mapping[str, object]], bool]
 
 
 @dataclass(frozen=True)
@@ -126,6 +129,33 @@ READ_ONLY_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "properties": {
                 "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1},
                 "staged": {"type": "boolean"},
+            },
+        },
+    ),
+)
+
+
+CONTROLLED_TOOL_SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        "workspace.patch",
+        "Apply a unified diff to explicitly approved workspace paths after user approval.",
+        {
+            "type": "object",
+            "required": ["patch"],
+            "properties": {
+                "patch": {"type": "string", "minLength": 1},
+            },
+        },
+    ),
+    ToolSpec(
+        "shell.exec",
+        "Run an explicitly approved executable argv in the scoped workspace without a shell.",
+        {
+            "type": "object",
+            "required": ["argv"],
+            "properties": {
+                "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
             },
         },
     ),
@@ -329,13 +359,184 @@ class ReadOnlyWorkspaceTools:
         return name in _DENIED_FILE_NAMES or any(fnmatch.fnmatch(name, pattern) for pattern in _DENIED_FILE_PATTERNS)
 
 
+class ControlledWorkspaceTools(ReadOnlyWorkspaceTools):
+    """Read-only tools plus explicitly approval-gated workspace mutations."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        allowed_paths: Sequence[str] = (),
+        approval: ApprovalCallback | None = None,
+        approval_callback: ApprovalCallback | None = None,
+        denied_paths: Sequence[str] = (),
+    ) -> None:
+        super().__init__(root, allowed_paths=allowed_paths)
+        if approval is not None and approval_callback is not None and approval is not approval_callback:
+            raise ToolError("set only one of approval or approval_callback")
+        callback = approval_callback if approval_callback is not None else approval
+        if callback is not None and not callable(callback):
+            raise ToolError("approval_callback must be callable or None")
+        self.approval_callback = callback
+        try:
+            self.denied_paths = tuple(normalize_scoped_path(path, "denied_path") for path in denied_paths)
+        except WorkspaceError as exc:
+            raise ToolError(str(exc)) from exc
+
+    @property
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return READ_ONLY_TOOL_SPECS + CONTROLLED_TOOL_SPECS
+
+    def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
+        if name == "workspace.patch":
+            return self.apply_patch(dict(arguments or {}))
+        if name == "shell.exec":
+            return self.exec_shell(dict(arguments or {}))
+        return super().call(name, arguments)
+
+    def apply_patch(self, args: Mapping[str, object]) -> ToolResult:
+        patch = args.get("patch")
+        if not isinstance(patch, str) or not patch.strip():
+            return ToolResult(name="workspace.patch", ok=False, error="patch must be a non-empty unified diff")
+        if not self.allowed_paths:
+            return ToolResult(name="workspace.patch", ok=False, error="patch requires explicit allowed paths")
+        try:
+            validation = validate_patch_paths(
+                patch,
+                allowed_paths=self.allowed_paths,
+                denied_paths=self.denied_paths,
+            )
+            if not validation.accepted:
+                return ToolResult(
+                    name="workspace.patch",
+                    ok=False,
+                    error="patch failed path scope validation",
+                    output={"validation": validation.as_dict()},
+                )
+            for path in validation.paths:
+                self._safe_path(path, must_exist=False)
+        except (ToolError, WorkspaceError, ValueError) as exc:
+            return ToolResult(name="workspace.patch", ok=False, error=str(exc))
+
+        if not self._approve(
+            "workspace.patch",
+            {"paths": list(validation.paths), "patch": patch, "validation": validation.as_dict()},
+        ):
+            return ToolResult(name="workspace.patch", ok=False, error="approval denied")
+
+        try:
+            check = subprocess.run(
+                ["git", "apply", "--check", "--whitespace=nowarn", "-"],
+                cwd=self.root,
+                input=patch,
+                shell=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+            )
+            if check.returncode != 0:
+                return ToolResult(
+                    name="workspace.patch",
+                    ok=False,
+                    error="git apply check failed",
+                    output={"stderr": check.stderr[:_MAX_OUTPUT_CHARS]},
+                )
+            applied = subprocess.run(
+                ["git", "apply", "--whitespace=nowarn", "-"],
+                cwd=self.root,
+                input=patch,
+                shell=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=15,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            return ToolResult(name="workspace.patch", ok=False, error=f"patch application failed: {type(exc).__name__}")
+        if applied.returncode != 0:
+            return ToolResult(
+                name="workspace.patch",
+                ok=False,
+                error="git apply failed",
+                output={"stderr": applied.stderr[:_MAX_OUTPUT_CHARS]},
+            )
+        return ToolResult(
+            name="workspace.patch",
+            ok=True,
+            output={"applied": True, "paths": list(validation.paths)},
+        )
+
+    def exec_shell(self, args: Mapping[str, object]) -> ToolResult:
+        argv = args.get("argv")
+        try:
+            normalized_argv = _normalize_argv(argv)
+            timeout = _bounded_int(args.get("timeout_seconds", 30), "timeout_seconds", 1, 120)
+        except ToolError as exc:
+            return ToolResult(name="shell.exec", ok=False, error=str(exc))
+        if not self._approve(
+            "shell.exec",
+            {"argv": list(normalized_argv), "cwd": ".", "timeout_seconds": timeout},
+        ):
+            return ToolResult(name="shell.exec", ok=False, error="approval denied")
+        try:
+            completed = subprocess.run(
+                list(normalized_argv),
+                cwd=self.root,
+                shell=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            return ToolResult(name="shell.exec", ok=False, error=f"command failed: {type(exc).__name__}")
+        return ToolResult(
+            name="shell.exec",
+            ok=completed.returncode == 0,
+            output={
+                "argv": list(normalized_argv),
+                "exit_code": completed.returncode,
+                "stdout": completed.stdout[:_MAX_OUTPUT_CHARS],
+                "stderr": completed.stderr[:_MAX_OUTPUT_CHARS],
+                "truncated": len(completed.stdout) > _MAX_OUTPUT_CHARS or len(completed.stderr) > _MAX_OUTPUT_CHARS,
+            },
+            error=None if completed.returncode == 0 else "command returned a non-zero exit code",
+        )
+
+    def _approve(self, operation: str, details: Mapping[str, object]) -> bool:
+        if self.approval_callback is None:
+            return False
+        try:
+            return self.approval_callback(operation, details) is True
+        except Exception:
+            return False
+
+
 def _bounded_int(value: object, field_name: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ToolError(f"{field_name} must be an integer from {minimum} to {maximum}")
     return value
 
 
+def _normalize_argv(value: object) -> tuple[str, ...]:
+    if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value:
+        raise ToolError("argv must be a non-empty list of strings")
+    if len(value) > 32 or any(not isinstance(item, str) or not item.strip() for item in value):
+        raise ToolError("argv must contain 1 to 32 non-empty strings")
+    return tuple(item.strip() for item in value)
+
+
 __all__ = [
+    "ApprovalCallback",
+    "CONTROLLED_TOOL_SPECS",
+    "ControlledWorkspaceTools",
     "READ_ONLY_TOOL_SPECS",
     "ReadOnlyWorkspaceTools",
     "ToolError",

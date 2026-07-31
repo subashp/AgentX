@@ -3,7 +3,7 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentx.tools import ReadOnlyWorkspaceTools
+from agentx.tools import ControlledWorkspaceTools, ReadOnlyWorkspaceTools
 
 
 class ReadOnlyWorkspaceToolsTests(unittest.TestCase):
@@ -70,6 +70,116 @@ class ReadOnlyWorkspaceToolsTests(unittest.TestCase):
         self.assertTrue(diff.ok)
         self.assertEqual(["git", "status", "--short", "--untracked-files=all"], run.call_args_list[0].args[0])
         self.assertIn("--no-ext-diff", run.call_args_list[1].args[0])
+
+
+class ControlledWorkspaceToolsTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path("tests") / ".tmp_controlled_workspace_tools"
+        shutil.rmtree(self.root, ignore_errors=True)
+        (self.root / "src").mkdir(parents=True)
+        (self.root / "src" / "main.py").write_text("print('before')\n", encoding="utf-8")
+        (self.root / "README.md").write_text("AgentX workspace\n", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _patch(self, path="src/main.py"):
+        return f"""diff --git a/{path} b/{path}
+--- a/{path}
++++ b/{path}
+@@ -1 +1 @@
+-print('before')
++print('after')
+"""
+
+    def _approval(self, decision):
+        calls = []
+
+        def approve(operation, details):
+            calls.append((operation, details))
+            return decision
+
+        return approve, calls
+
+    def test_patch_approval_denial_does_not_invoke_git_apply(self):
+        approve, calls = self._approval(False)
+        tools = ControlledWorkspaceTools(
+            self.root,
+            allowed_paths=("src/main.py",),
+            approval_callback=approve,
+        )
+
+        with mock.patch("agentx.tools.subprocess.run") as run:
+            result = tools.call("workspace.patch", {"patch": self._patch()})
+
+        self.assertFalse(result.ok)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("workspace.patch", calls[0][0])
+        run.assert_not_called()
+        self.assertEqual("print('before')\n", (self.root / "src" / "main.py").read_text(encoding="utf-8"))
+
+    def test_patch_validation_rejects_out_of_scope_path_before_approval(self):
+        approve, calls = self._approval(True)
+        tools = ControlledWorkspaceTools(
+            self.root,
+            allowed_paths=("src/main.py",),
+            approval_callback=approve,
+        )
+
+        with mock.patch("agentx.tools.subprocess.run") as run:
+            result = tools.call("workspace.patch", {"patch": self._patch("README.md")})
+
+        self.assertFalse(result.ok)
+        self.assertEqual([], calls)
+        run.assert_not_called()
+        self.assertEqual("patch_path_out_of_scope", result.output["validation"]["events"][0]["code"])
+
+    def test_patch_approval_success_invokes_git_apply_without_shell(self):
+        approve, calls = self._approval(True)
+        tools = ControlledWorkspaceTools(
+            self.root,
+            allowed_paths=("src/main.py",),
+            approval_callback=approve,
+        )
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+
+        with mock.patch("agentx.tools.subprocess.run", return_value=completed) as run:
+            result = tools.call("workspace.patch", {"patch": self._patch()})
+
+        self.assertTrue(result.ok)
+        self.assertEqual("workspace.patch", calls[0][0])
+        command = run.call_args.args[0]
+        self.assertEqual(["git", "apply"], command[:2])
+        self.assertFalse(run.call_args.kwargs["shell"])
+        self.assertEqual(self.root.resolve(), run.call_args.kwargs["cwd"])
+        self.assertEqual(self._patch(), run.call_args.kwargs["input"])
+
+    def test_shell_approval_denial_does_not_invoke_subprocess(self):
+        approve, calls = self._approval(False)
+        tools = ControlledWorkspaceTools(self.root, allowed_paths=("src/main.py",), approval_callback=approve)
+
+        with mock.patch("agentx.tools.subprocess.run") as run:
+            result = tools.call("shell.exec", {"argv": ["python", "--version"]})
+
+        self.assertFalse(result.ok)
+        self.assertEqual(1, len(calls))
+        self.assertEqual("shell.exec", calls[0][0])
+        run.assert_not_called()
+
+    def test_shell_exec_uses_argv_without_shell(self):
+        approve, calls = self._approval(True)
+        tools = ControlledWorkspaceTools(self.root, allowed_paths=("src/main.py",), approval_callback=approve)
+        completed = mock.Mock(returncode=0, stdout="ok\n", stderr="")
+        argv = ["python", "-c", "print('ok')"]
+
+        with mock.patch("agentx.tools.subprocess.run", return_value=completed) as run:
+            result = tools.call("shell.exec", {"argv": argv})
+
+        self.assertTrue(result.ok)
+        self.assertEqual("shell.exec", calls[0][0])
+        self.assertEqual(argv, run.call_args.args[0])
+        self.assertFalse(run.call_args.kwargs["shell"])
+        self.assertEqual(self.root.resolve(), run.call_args.kwargs["cwd"])
 
 
 if __name__ == "__main__":
