@@ -14,6 +14,7 @@ from agentx.openai_compatible import (
 )
 from agentx.routing import AgentRun
 from agentx.store import RUN_ARTIFACT_FILES, SessionStore
+from agentx.tools import ReadOnlyWorkspaceTools
 
 
 class PrivateAdapterFixtureTestCase(unittest.TestCase):
@@ -26,6 +27,7 @@ class PrivateAdapterFixtureTestCase(unittest.TestCase):
         self.server.requests = []
         self.server.response_status = 200
         self.server.stream_events = None
+        self.server.response_bodies = None
         self.server.response_body = {
             "id": "chatcmpl-test",
             "choices": [
@@ -207,6 +209,76 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertEqual("reasoning continues", result.outcome["thinking"])
         self.assertEqual("Final answer.", result.outcome["response"])
 
+    def test_tool_loop_executes_read_only_tool_and_returns_follow_up(self):
+        (self.fixture_root / "README.md").write_text("tool-visible fixture", encoding="utf-8")
+        self.server.response_bodies = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-tree-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace.tree",
+                                        "arguments": '{"path":"","max_entries":10}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ],
+                "usage": {"prompt_tokens": 10, "completion_tokens": 2, "total_tokens": 12},
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "The workspace contains the requested fixture.",
+                        }
+                    }
+                ],
+                "usage": {"prompt_tokens": 20, "completion_tokens": 8, "total_tokens": 28},
+            },
+        ]
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            tool_executor=ReadOnlyWorkspaceTools(self.fixture_root),
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Inspect the workspace",
+                    provider="private-openai-compatible",
+                    required_tools=("workspace.tree",),
+                )
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        self.assertEqual("The workspace contains the requested fixture.", result.outcome["summary"])
+        self.assertEqual(["workspace.tree"], result.outcome["tools_used"])
+        self.assertEqual(2, len(self.server.requests))
+        first_payload = self.server.requests[0]["json"]
+        self.assertEqual("auto", first_payload["tool_choice"])
+        self.assertEqual(
+            {"workspace.tree", "workspace.read", "workspace.search", "git.status", "git.diff"},
+            {tool["function"]["name"] for tool in first_payload["tools"]},
+        )
+        second_messages = self.server.requests[1]["json"]["messages"]
+        self.assertEqual("assistant", second_messages[2]["role"])
+        self.assertEqual("tool", second_messages[3]["role"])
+        self.assertEqual("call-tree-1", second_messages[3]["tool_call_id"])
+        self.assertIn('"path": "README.md"', second_messages[3]["content"])
+        self.assertEqual(40, result.cost["usage"]["total_tokens"])
+
     def test_context_contents_are_bounded_to_policy_included_paths(self):
         context_root = self.fixture_root / "workspace"
         context_root.mkdir()
@@ -365,7 +437,11 @@ class RecordingOpenAIHandler(BaseHTTPRequestHandler):
             ) + b"data: [DONE]\n\n"
             content_type = "text/event-stream"
         else:
-            response_body = self.server.response_body
+            response_bodies = getattr(self.server, "response_bodies", None)
+            if response_bodies:
+                response_body = response_bodies.pop(0)
+            else:
+                response_body = self.server.response_body
             if isinstance(response_body, str):
                 raw_body = response_body.encode("utf-8")
             else:

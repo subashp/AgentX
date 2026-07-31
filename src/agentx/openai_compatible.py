@@ -20,6 +20,7 @@ from .adapters import (
     _selected_model_tier,
 )
 from .routing import AgentRun
+from .tools import ToolError, ToolExecutor, ToolResult, ToolSpec
 
 
 DEFAULT_PROVIDER_ID = "private-openai-compatible"
@@ -68,25 +69,39 @@ class OpenAICompatibleChatClient:
 
     def build_payload(
         self,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, object]],
         *,
         model: str | None = None,
         stream: bool = False,
+        tools: Sequence[Mapping[str, object]] | None = None,
+        tool_choice: str | Mapping[str, object] | None = None,
     ) -> dict[str, object]:
         normalized_model = self.model if model is None else _normalize_non_empty_string(model, "model")
-        return {
+        payload: dict[str, object] = {
             "model": normalized_model,
             "messages": [_normalize_message(message) for message in messages],
             "stream": stream,
         }
+        if tools is not None:
+            payload["tools"] = [dict(tool) for tool in tools]
+        if tool_choice is not None:
+            payload["tool_choice"] = tool_choice
+        return payload
 
     def create_chat_completion(
         self,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, object]],
         *,
         model: str | None = None,
+        tools: Sequence[Mapping[str, object]] | None = None,
+        tool_choice: str | Mapping[str, object] | None = None,
     ) -> Mapping[str, object]:
-        payload = self.build_payload(messages, model=model)
+        payload = self.build_payload(
+            messages,
+            model=model,
+            tools=tools,
+            tool_choice=tool_choice,
+        )
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         headers = {
             "Accept": "application/json",
@@ -161,7 +176,7 @@ class OpenAICompatibleChatClient:
 
     def stream_chat_completion(
         self,
-        messages: Sequence[Mapping[str, str]],
+        messages: Sequence[Mapping[str, object]],
         *,
         model: str | None = None,
     ) -> Iterator[Mapping[str, object]]:
@@ -227,6 +242,8 @@ class OpenAICompatibleAdapter:
         client: OpenAICompatibleChatClient | None = None,
         stream: bool = False,
         stream_callback: Callable[[str, str], None] | None = None,
+        tool_executor: ToolExecutor | None = None,
+        max_tool_rounds: int = 8,
     ) -> None:
         self.provider_id = _normalize_non_empty_string(provider_id, "provider_id")
         if not isinstance(stream, bool):
@@ -235,6 +252,18 @@ class OpenAICompatibleAdapter:
             raise AdapterError("stream_callback must be callable or None.")
         self.stream = stream
         self.stream_callback = stream_callback
+        if tool_executor is not None:
+            if not hasattr(tool_executor, "specs") or not callable(getattr(tool_executor, "call", None)):
+                raise AdapterError("tool_executor must provide specs and call().")
+            specs = getattr(tool_executor, "specs")
+            if not isinstance(specs, Sequence) or isinstance(specs, (str, bytes)) or not all(
+                isinstance(spec, ToolSpec) for spec in specs
+            ):
+                raise AdapterError("tool_executor.specs must contain ToolSpec values.")
+        if isinstance(max_tool_rounds, bool) or not isinstance(max_tool_rounds, int) or not 1 <= max_tool_rounds <= 32:
+            raise AdapterError("max_tool_rounds must be an integer from 1 to 32.")
+        self.tool_executor = tool_executor
+        self.max_tool_rounds = max_tool_rounds
         if context_root is not None and not isinstance(context_root, (str, Path)):
             raise AdapterError("context_root must be a string, Path, or None.")
         self.context_root = None if context_root is None else Path(context_root)
@@ -287,7 +316,13 @@ class OpenAICompatibleAdapter:
         )
 
         try:
-            if self.stream:
+            tool_calls: tuple[str, ...] = ()
+            if self.tool_executor is not None:
+                response, assistant_content, thinking, usage, tool_calls = self._execute_with_tools(
+                    messages,
+                    model_id=model_id,
+                )
+            elif self.stream:
                 assistant_content, thinking, usage = self._execute_stream(
                     messages,
                     model_id=model_id,
@@ -325,7 +360,7 @@ class OpenAICompatibleAdapter:
                 "sequence": 3,
                 "event": "response_received",
                 "status": "success",
-                "choice_count": 1 if self.stream else _choice_count(response),
+                "choice_count": 1 if self.stream and self.tool_executor is None else _choice_count(response),
                 "usage_present": usage is not None,
             },
             {
@@ -339,11 +374,13 @@ class OpenAICompatibleAdapter:
             "outcome": "openai_compatible_completed",
             "summary": assistant_content,
             "response": assistant_content,
-            "streamed": self.stream,
+            "streamed": self.stream and self.tool_executor is None,
             "patch_applied": False,
         }
         if thinking:
             outcome["thinking"] = thinking
+        if tool_calls:
+            outcome["tools_used"] = list(tool_calls)
         return AdapterResult(
             provider_id=self.provider_id,
             model_id=model_id,
@@ -353,6 +390,66 @@ class OpenAICompatibleAdapter:
             cost=_cost_from_usage(usage),
             outcome=outcome,
             patch="",
+        )
+
+    def _execute_with_tools(
+        self,
+        messages: Sequence[Mapping[str, object]],
+        *,
+        model_id: str,
+    ) -> tuple[
+        Mapping[str, object] | None,
+        str | None,
+        str | None,
+        Mapping[str, object] | None,
+        tuple[str, ...],
+    ]:
+        if self.tool_executor is None:
+            raise AdapterError("tool executor is not configured.")
+        conversation: list[Mapping[str, object]] = [dict(message) for message in messages]
+        tool_specs = tuple(spec.as_dict() for spec in self.tool_executor.specs)
+        used_tools: list[str] = []
+        usage: Mapping[str, object] | None = None
+
+        for _round in range(self.max_tool_rounds):
+            response = self.client.create_chat_completion(
+                conversation,
+                model=model_id,
+                tools=tool_specs,
+                tool_choice="auto",
+            )
+            event_usage = _normalize_usage(response.get("usage"))
+            if event_usage is not None:
+                usage = _merge_usage(usage, event_usage)
+            message = _first_assistant_message(response)
+            if message is None:
+                raise OpenAICompatibleClientError(
+                    "malformed_response",
+                    "OpenAI-compatible endpoint response did not include an assistant message.",
+                )
+            tool_calls = _extract_tool_calls(message)
+            if not tool_calls:
+                assistant_content, thinking = _extract_assistant_message(response)
+                return response, assistant_content, thinking, usage, tuple(used_tools)
+
+            conversation.append(dict(message))
+            for tool_call in tool_calls:
+                name = tool_call["name"]
+                call_id = tool_call["id"]
+                used_tools.append(name)
+                result = _run_tool_call(self.tool_executor, name, tool_call["arguments"])
+                conversation.append(
+                    {
+                        "role": "tool",
+                        "tool_call_id": call_id,
+                        "name": name,
+                        "content": result.as_json(),
+                    }
+                )
+
+        raise OpenAICompatibleClientError(
+            "tool_loop_limit",
+            f"OpenAI-compatible provider exceeded the {self.max_tool_rounds}-round tool limit.",
         )
 
     def _execute_stream(
@@ -566,8 +663,95 @@ def _normalize_message(value: Mapping[str, str]) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise AdapterError("messages must contain mappings.")
     role = _normalize_non_empty_string(value.get("role"), "message.role")
-    content = _normalize_non_empty_string(value.get("content"), "message.content")
-    return {"role": role, "content": content}
+    content = value.get("content")
+    if content is None:
+        if role != "assistant" or "tool_calls" not in value:
+            raise AdapterError("message.content must be a non-empty string.")
+    elif not isinstance(content, str) or not content.strip():
+        raise AdapterError("message.content must be a non-empty string.")
+    normalized: dict[str, object] = {"role": role, "content": content}
+    if "tool_calls" in value:
+        tool_calls = value["tool_calls"]
+        if not isinstance(tool_calls, Sequence) or isinstance(tool_calls, (str, bytes)):
+            raise AdapterError("message.tool_calls must be a list.")
+        normalized["tool_calls"] = [dict(call) for call in tool_calls if isinstance(call, Mapping)]
+    for field in ("tool_call_id", "name"):
+        if field in value:
+            normalized[field] = _normalize_non_empty_string(value[field], f"message.{field}")
+    return normalized
+
+
+def _first_assistant_message(response: Mapping[str, object]) -> Mapping[str, object] | None:
+    choices = response.get("choices")
+    if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices:
+        return None
+    first = choices[0]
+    if not isinstance(first, Mapping):
+        return None
+    message = first.get("message")
+    return message if isinstance(message, Mapping) else None
+
+
+def _extract_tool_calls(message: Mapping[str, object]) -> tuple[dict[str, object], ...]:
+    raw_calls = message.get("tool_calls")
+    if raw_calls is None:
+        return ()
+    if not isinstance(raw_calls, Sequence) or isinstance(raw_calls, (str, bytes)):
+        raise OpenAICompatibleClientError(
+            "malformed_response",
+            "OpenAI-compatible assistant tool_calls must be a list.",
+        )
+    calls: list[dict[str, object]] = []
+    for index, raw_call in enumerate(raw_calls, start=1):
+        if not isinstance(raw_call, Mapping):
+            raise OpenAICompatibleClientError(
+                "malformed_response",
+                "OpenAI-compatible assistant tool calls must be objects.",
+            )
+        function = raw_call.get("function")
+        if not isinstance(function, Mapping):
+            raise OpenAICompatibleClientError(
+                "malformed_response",
+                "OpenAI-compatible tool call is missing its function object.",
+            )
+        name = function.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise OpenAICompatibleClientError(
+                "malformed_response",
+                "OpenAI-compatible tool call is missing a function name.",
+            )
+        call_id = raw_call.get("id") or f"agentx-tool-call-{index}"
+        if not isinstance(call_id, str) or not call_id.strip():
+            raise OpenAICompatibleClientError(
+                "malformed_response",
+                "OpenAI-compatible tool call is missing an id.",
+            )
+        arguments = function.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {"__agentx_invalid_arguments__": arguments}
+        if not isinstance(arguments, Mapping):
+            arguments = {"__agentx_invalid_arguments__": arguments}
+        calls.append({"id": call_id, "name": name.strip(), "arguments": dict(arguments)})
+    return tuple(calls)
+
+
+def _run_tool_call(executor: ToolExecutor, name: str, arguments: Mapping[str, object]) -> ToolResult:
+    if "__agentx_invalid_arguments__" in arguments:
+        return ToolResult(
+            name=name,
+            ok=False,
+            error="tool arguments must be a valid JSON object",
+        )
+    try:
+        result = executor.call(name, arguments)
+    except (ToolError, TypeError, ValueError, KeyError) as exc:
+        return ToolResult(name=name, ok=False, error=str(exc) or "tool call failed")
+    if not isinstance(result, ToolResult):
+        return ToolResult(name=name, ok=False, error="tool executor returned an invalid result")
+    return result
 
 
 def _extract_assistant_message(response: Mapping[str, object]) -> tuple[str | None, str | None]:
@@ -778,6 +962,28 @@ def _normalize_usage(value: object) -> Mapping[str, object] | None:
     if not isinstance(value, Mapping):
         return None
     return dict(value)
+
+
+def _merge_usage(
+    previous: Mapping[str, object] | None,
+    current: Mapping[str, object],
+) -> Mapping[str, object]:
+    """Aggregate per-request usage from a multi-turn tool exchange."""
+
+    if previous is None:
+        return dict(current)
+    merged = dict(previous)
+    for field in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        old_value = previous.get(field)
+        new_value = current.get(field)
+        if isinstance(old_value, int) and not isinstance(old_value, bool) and isinstance(new_value, int) and not isinstance(new_value, bool):
+            merged[field] = old_value + new_value
+        elif field in current:
+            merged[field] = new_value
+    for key, value in current.items():
+        if key not in {"prompt_tokens", "completion_tokens", "total_tokens"}:
+            merged[key] = value
+    return merged
 
 
 def _cost_from_usage(usage: Mapping[str, object] | None) -> dict[str, object]:

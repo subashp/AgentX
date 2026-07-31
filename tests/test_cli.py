@@ -1220,6 +1220,7 @@ class RecordingPrivateAdapter:
         context_root,
         stream=False,
         stream_callback=None,
+        tool_executor=None,
     ):
         self.base_url = base_url
         self.model = model
@@ -1229,6 +1230,7 @@ class RecordingPrivateAdapter:
         self.context_root = context_root
         self.stream = stream
         self.stream_callback = stream_callback
+        self.tool_executor = tool_executor
         self.instances.append(self)
 
     def execute(self, request):

@@ -8,13 +8,24 @@ import subprocess
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Protocol
 
 from .workspace import WorkspaceError, normalize_scoped_path
 
 
 class ToolError(ValueError):
     """Raised when a workspace tool request is invalid or out of scope."""
+
+
+class ToolExecutor(Protocol):
+    """Provider-neutral boundary for model-requested tools."""
+
+    @property
+    def specs(self) -> Sequence["ToolSpec"]:
+        """Return the tool schemas exposed to a model."""
+
+    def call(self, name: str, arguments: Mapping[str, object] | None = None) -> "ToolResult":
+        """Execute one validated tool call and return a bounded result."""
 
 
 @dataclass(frozen=True)
@@ -265,7 +276,9 @@ class ReadOnlyWorkspaceTools:
         return tuple(files)
 
     def _walk(self, root: Path):
-        for current, directories, files in __import__("os").walk(root, followlinks=False):
+        import os
+
+        for current, directories, files in os.walk(root, followlinks=False):
             directories[:] = [directory for directory in directories if not self._is_denied(Path(current) / directory)]
             files[:] = [filename for filename in files if not self._is_denied(Path(current) / filename)]
             yield Path(current), sorted(directories), sorted(files)
@@ -322,4 +335,11 @@ def _bounded_int(value: object, field_name: str, minimum: int, maximum: int) -> 
     return value
 
 
-__all__ = ["READ_ONLY_TOOL_SPECS", "ReadOnlyWorkspaceTools", "ToolError", "ToolResult", "ToolSpec"]
+__all__ = [
+    "READ_ONLY_TOOL_SPECS",
+    "ReadOnlyWorkspaceTools",
+    "ToolError",
+    "ToolExecutor",
+    "ToolResult",
+    "ToolSpec",
+]

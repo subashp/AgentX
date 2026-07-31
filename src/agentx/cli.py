@@ -12,6 +12,7 @@ from .adapters import AdapterError, CliPlanAdapter, CodexCliAdapter, execute_fak
 from .config import ConfigError, ProviderSettings, Settings, load_settings
 from .openai_compatible import OpenAICompatibleAdapter
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
+from .tools import ReadOnlyWorkspaceTools, ToolError
 from .workspace import WorkspaceError, normalize_scoped_path
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
@@ -801,6 +802,7 @@ def _plan(
                 if provider_settings.api_key_env
                 else None
             )
+            scoped_source_root = Path(source_root)
             adapter = OpenAICompatibleAdapter(
                 base_url=endpoint,
                 model=provider_settings.model,
@@ -819,8 +821,11 @@ def _plan(
                     if not json_output
                     else None
                 ),
+                tool_executor=ReadOnlyWorkspaceTools(
+                    scoped_source_root,
+                    allowed_paths=context_paths,
+                ),
             )
-            scoped_source_root = Path(source_root)
 
         run = AgentRun(
             prompt=prompt,
@@ -841,6 +846,7 @@ def _plan(
         )
     except (
         AdapterError,
+        ToolError,
         OrchestratorError,
         RouteValidationError,
         StoreError,
