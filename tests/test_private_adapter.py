@@ -281,6 +281,90 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertIn('"path": "README.md"', second_messages[3]["content"])
         self.assertEqual(40, result.cost["usage"]["total_tokens"])
 
+    def test_tool_loop_executes_raw_qwen_tool_call_and_returns_follow_up(self):
+        (self.fixture_root / "README.md").write_text("tool-visible fixture", encoding="utf-8")
+        self.server.response_bodies = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": (
+                                "<tool_call>\n"
+                                '{"name":"workspace_tree","arguments":{"path":"","max_entries":10}}\n'
+                                "</tool_call>"
+                            ),
+                        },
+                        "finish_reason": "stop",
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "The workspace contains the requested fixture.",
+                        }
+                    }
+                ]
+            },
+        ]
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            tool_executor=ReadOnlyWorkspaceTools(self.fixture_root),
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Inspect the workspace",
+                    provider="private-openai-compatible",
+                )
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        self.assertEqual(["workspace_tree"], result.outcome["tools_used"])
+        self.assertEqual("The workspace contains the requested fixture.", result.outcome["summary"])
+        self.assertEqual(2, len(self.server.requests))
+        second_messages = self.server.requests[1]["json"]["messages"]
+        self.assertEqual("assistant", second_messages[2]["role"])
+        self.assertIsNone(second_messages[2]["content"])
+        raw_call = second_messages[2]["tool_calls"][0]
+        self.assertEqual("workspace_tree", raw_call["function"]["name"])
+        self.assertEqual(
+            {"path": "", "max_entries": 10},
+            json.loads(raw_call["function"]["arguments"]),
+        )
+        self.assertEqual("tool", second_messages[3]["role"])
+        self.assertEqual("agentx-qwen-tool-call-1", second_messages[3]["tool_call_id"])
+
+    def test_tool_loop_rejects_malformed_raw_qwen_tool_call(self):
+        self.server.response_body["choices"][0]["message"] = {
+            "role": "assistant",
+            "content": "<tool_call>{not-json}</tool_call>",
+        }
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            tool_executor=ReadOnlyWorkspaceTools(self.fixture_root),
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Inspect the workspace",
+                    provider="private-openai-compatible",
+                )
+            )
+        )
+
+        self.assertEqual("failure", result.status)
+        self.assertIn("valid JSON", result.outcome["summary"])
+        self.assertEqual(1, len(self.server.requests))
+
     def test_tool_loop_creates_child_and_returns_child_summary(self):
         class FixtureRunner:
             def __init__(self):

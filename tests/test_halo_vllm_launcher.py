@@ -10,7 +10,7 @@ class HaloVllmLauncherTests(unittest.TestCase):
         text = LAUNCHER.read_text(encoding="utf-8")
 
         self.assertIn('ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-1}"', text)
-        self.assertIn('TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3}"', text)
+        self.assertIn('TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_xml}"', text)
         self.assertIn('REASONING_PARSER="${REASONING_PARSER:-qwen3}"', text)
         self.assertIn("--enable-auto-tool-choice", text)
         self.assertIn('"${TOOL_CALLING_ARGS[@]}"', text)

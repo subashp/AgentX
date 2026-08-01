@@ -13,7 +13,9 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-2}"
 GPU_MEMORY_UTILIZATION="${GPU_MEMORY_UTILIZATION:-0.88}"
 KV_CACHE_DTYPE="${KV_CACHE_DTYPE:-auto}"
 ENABLE_TOOL_CALLING="${ENABLE_TOOL_CALLING:-1}"
-TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3}"
+# vLLM 0.26 names the Qwen XML parser `qwen3_xml`; `qwen3` is a
+# reasoning-parser name and is rejected when passed as a tool-call parser.
+TOOL_CALL_PARSER="${TOOL_CALL_PARSER:-qwen3_xml}"
 REASONING_PARSER="${REASONING_PARSER:-qwen3}"
 
 AUTH_ARGS=()

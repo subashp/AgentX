@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import socket
 import urllib.error
 import urllib.parse
@@ -24,6 +25,9 @@ from .tools import ToolError, ToolExecutor, ToolResult, ToolSpec
 
 
 DEFAULT_PROVIDER_ID = "private-openai-compatible"
+_RAW_QWEN_TOOL_CALL = re.compile(
+    r"<tool_call>\s*(?P<payload>\{.*?\})\s*</tool_call>", re.DOTALL
+)
 
 
 class OpenAICompatibleClientError(RuntimeError):
@@ -428,11 +432,21 @@ class OpenAICompatibleAdapter:
                     "OpenAI-compatible endpoint response did not include an assistant message.",
                 )
             tool_calls = _extract_tool_calls(message)
+            raw_qwen_tool_calls = False
+            if not tool_calls:
+                tool_calls = _extract_raw_qwen_tool_calls(message)
+                raw_qwen_tool_calls = bool(tool_calls)
             if not tool_calls:
                 assistant_content, thinking = _extract_assistant_message(response)
                 return response, assistant_content, thinking, usage, tuple(used_tools)
 
-            conversation.append(dict(message))
+            conversation.append(
+                _assistant_tool_message(
+                    message,
+                    tool_calls,
+                    raw_qwen_tool_calls=raw_qwen_tool_calls,
+                )
+            )
             for tool_call in tool_calls:
                 name = tool_call["name"]
                 call_id = tool_call["id"]
@@ -735,6 +749,97 @@ def _extract_tool_calls(message: Mapping[str, object]) -> tuple[dict[str, object
             arguments = {"__agentx_invalid_arguments__": arguments}
         calls.append({"id": call_id, "name": name.strip(), "arguments": dict(arguments)})
     return tuple(calls)
+
+
+def _extract_raw_qwen_tool_calls(message: Mapping[str, object]) -> tuple[dict[str, object], ...]:
+    """Decode Qwen's raw XML-wrapped JSON fallback when vLLM misses it.
+
+    vLLM normally translates model output into OpenAI ``tool_calls``. Some
+    Qwen/vLLM combinations leave complete ``<tool_call>{...}</tool_call>``
+    blocks in ``message.content`` instead. Only an otherwise-empty sequence of
+    complete blocks is accepted, so ordinary assistant prose is never executed
+    as a tool request.
+    """
+    content = _extract_text_value(message.get("content"))
+    if content is None:
+        return ()
+    matches = tuple(_RAW_QWEN_TOOL_CALL.finditer(content))
+    if not matches:
+        if "<tool_call>" in content or "</tool_call>" in content:
+            raise OpenAICompatibleClientError(
+                "malformed_tool_call",
+                "Qwen returned an incomplete or malformed raw tool-call block.",
+            )
+        return ()
+    remainder = _RAW_QWEN_TOOL_CALL.sub("", content).strip()
+    if remainder:
+        raise OpenAICompatibleClientError(
+            "malformed_tool_call",
+            "Qwen mixed raw tool-call blocks with assistant content.",
+        )
+
+    calls: list[dict[str, object]] = []
+    for index, match in enumerate(matches, start=1):
+        try:
+            payload = json.loads(match.group("payload"))
+        except json.JSONDecodeError as exc:
+            raise OpenAICompatibleClientError(
+                "malformed_tool_call",
+                "Qwen raw tool-call arguments must be valid JSON.",
+            ) from exc
+        if not isinstance(payload, Mapping):
+            raise OpenAICompatibleClientError(
+                "malformed_tool_call",
+                "Qwen raw tool-call payload must be a JSON object.",
+            )
+        name = payload.get("name")
+        if not isinstance(name, str) or not name.strip():
+            raise OpenAICompatibleClientError(
+                "malformed_tool_call",
+                "Qwen raw tool-call payload is missing a function name.",
+            )
+        arguments = payload.get("arguments", {})
+        if isinstance(arguments, str):
+            try:
+                arguments = json.loads(arguments or "{}")
+            except json.JSONDecodeError:
+                arguments = {"__agentx_invalid_arguments__": arguments}
+        if not isinstance(arguments, Mapping):
+            arguments = {"__agentx_invalid_arguments__": arguments}
+        calls.append(
+            {
+                "id": f"agentx-qwen-tool-call-{index}",
+                "name": name.strip(),
+                "arguments": dict(arguments),
+            }
+        )
+    return tuple(calls)
+
+
+def _assistant_tool_message(
+    message: Mapping[str, object],
+    tool_calls: Sequence[Mapping[str, object]],
+    *,
+    raw_qwen_tool_calls: bool,
+) -> dict[str, object]:
+    """Return the assistant turn in the OpenAI shape expected before tools."""
+    if not raw_qwen_tool_calls:
+        return dict(message)
+    return {
+        "role": "assistant",
+        "content": None,
+        "tool_calls": [
+            {
+                "id": str(call["id"]),
+                "type": "function",
+                "function": {
+                    "name": str(call["name"]),
+                    "arguments": json.dumps(call["arguments"], separators=(",", ":")),
+                },
+            }
+            for call in tool_calls
+        ],
+    }
 
 
 def _run_tool_call(executor: ToolExecutor, name: str, arguments: Mapping[str, object]) -> ToolResult:
