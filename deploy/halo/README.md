@@ -60,11 +60,13 @@ The first launch pulls `docker.io/vllm/vllm-openai-rocm:latest` and downloads
 `Qwen/Qwen3-14B` into `~/models/vllm-huggingface`. Set `HF_TOKEN` in your own
 shell if Hugging Face authentication is required; never put it in this repo.
 
-The launcher enables vLLM automatic tool calling by default with the Qwen3
-parser. AgentX uses this for read-only workspace inspection and private-model
-subagents. If you intentionally need a plain chat-only server, set
-`ENABLE_TOOL_CALLING=0` before starting it; AgentX tool calls will not work in
-that mode.
+The launcher enables vLLM automatic tool calling by default with the Qwen XML
+tool parser (`qwen3_xml` in vLLM 0.26). AgentX uses this for read-only workspace
+inspection and private-model subagents. It normally receives OpenAI structured
+tool calls and also safely handles complete raw Qwen `<tool_call>` blocks if a
+vLLM response leaves them in assistant content. If you intentionally need a
+plain chat-only server, set `ENABLE_TOOL_CALLING=0` before starting it; AgentX
+tool calls will not work in that mode.
 
 `start.sh` starts the existing vLLM and gateway scripts, waits for
 `/v1/models`, and updates the external AgentX settings with the model ID that

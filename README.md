@@ -1,194 +1,163 @@
 # AgentX
 
-AgentX is a provider-neutral, privacy-first command-line gateway for agentic
-coding workflows. It routes coding tasks through local policy boundaries before
-any provider receives context, and it records deterministic local artifacts for
-auditing.
+AgentX turns an AMD Ryzen AI Max+ Halo machine into a private Qwen service for
+chatting, coding assistance, and OpenAI-compatible inference. It includes a
+local browser UI, the `agentx` coding CLI, and a gateway for other machines.
 
-The current implementation is a standard-library Python package for Python 3.11
-and newer. It has no runtime package dependencies today.
+The default deployment keeps every service on your Halo machine:
 
-AgentX is built so provider choice stays policy-driven rather than hard-coded to
-one commercial backend. Public CLIs, private model endpoints, and future compute
-backends are modeled as adapters behind the same routing and artifact contracts.
+- **Web UI:** a private, persistent chat interface at `http://127.0.0.1:8000/`.
+- **AgentX CLI:** a coding assistant that can inspect a selected workspace.
+- **OpenAI-compatible API:** `http://127.0.0.1:8000/v1` for local programs.
 
-## Halo local-model deployment
+## Get started on a Halo machine
 
-The repository includes a reproducible AMD Halo/ROCm vLLM deployment under
-[`deploy/halo`](deploy/halo/). It launches Qwen3-14B locally, provides a
-persistent browser chat UI, proxies the OpenAI-compatible API for external
-clients, and provides a shared machine conversation endpoint separate from
-AgentX's stateless coding-run integration. See [the Halo deployment guide](deploy/halo/README.md) for
-hardware prerequisites, startup, client endpoints, and security constraints.
+This is the shortest supported path for a Halo image that already includes its
+ROCm stack. It downloads the vLLM container and Qwen3-14B on the first start,
+then keeps both cached locally.
 
-The Halo-local path does not require ngrok: the Web UI and AgentX can both use
-the loopback gateway on the Halo host. Halo supplies the ROCm, Python, and
-vLLM prerequisites; the checked-in scripts pull the vLLM image and download
-Qwen model artifacts on first launch. Codex, Claude Code, and Kiro CLI are
-optional local integrations. When present, they remain selectable alongside
-the private Qwen provider; when absent, Qwen can be used by itself.
+You need:
 
-The shortest Halo-local path is:
+- A Halo Linux image where `rocminfo` sees `gfx1151`.
+- Docker or Podman, and a user in the `render` group.
+- At least 70 GiB of free disk space.
 
-```sh
-./deploy/halo/setup.sh
-./deploy/halo/start.sh
-agentx
-```
+Clone the repository and use a virtual environment. The virtual environment is
+intentional: Ubuntu prevents `pip` from changing its system Python installation.
 
-This keeps the Web UI and AgentX on the Halo host. See the deployment guide
-for optional remote access through a manually installed ngrok tunnel.
-
-## AgentX quickstart
-
-For a general AgentX checkout, install the `agentx` console command once:
-
-```sh
+```bash
+git clone https://github.com/subashp/AgentX.git
+cd AgentX
+python3 -m venv .venv
+source .venv/bin/activate
 python -m pip install --editable .
 ```
 
-Then inspect the available providers and enter the interactive workflow:
+Prepare the host, then start the model and local gateway:
 
-```sh
-agentx providers list
+```bash
+./deploy/halo/setup.sh
+./deploy/halo/start.sh
+```
+
+`start.sh` waits until the model is ready. On its first run it can take a while
+to pull the container and download the model. It prints the log locations if
+startup needs investigation.
+
+Once ready, use the service locally:
+
+```bash
+# Open http://127.0.0.1:8000/ in a browser for chat.
 agentx
 ```
 
-Use subcommands when you want a non-interactive workflow:
+At the `agentx` prompt, choose the private provider when asked, then give it a
+coding task. You can also select it explicitly:
 
-```sh
-agentx providers list
-agentx route "summarize the routing module"
-agentx plan --context README.md "plan a documentation cleanup"
-agentx config path
+```bash
+agentx --provider private-openai-compatible
 ```
 
-Use `--json` before a subcommand for machine-readable output. The module form
-`python -m agentx` remains a fallback when the `agentx` console script is not on
-your `PATH`; the documented interface is the `agentx` command.
+Useful everyday commands:
 
-Run `agentx` without a subcommand to enter the provider-aware interactive CLI:
-
-```sh
-agentx
+```bash
+./deploy/halo/status.sh  # check the model and gateway
+./deploy/halo/stop.sh    # stop them
+./deploy/halo/start.sh   # start them again
 ```
 
-AgentX checks Codex, Claude Code, Kiro CLI, and the configured private model at
-startup. It then lets you choose a default provider for the session. That
-provider remains selected for subsequent tasks until you use `/provider` to
-change it:
+After a reboot, return to the checkout, activate the virtual environment, and
+run `./deploy/halo/start.sh` again.
 
-```sh
-agentx interactive --provider codex
-agentx --provider claude
-```
+### What to use for what
 
-Inside the session, enter a task at the `agentx[provider]>` prompt. Use
-`/provider auto`, `/providers`, `/context`, `/help`, or `/quit` to control the
-session. `/context` sets the relative files or directories that the next task
-may use; `/context clear` removes that selection:
+| Need | Use |
+| --- | --- |
+| Private ChatGPT-style chat | Open `http://127.0.0.1:8000/` |
+| Coding help in a repository | `agentx` from that repository |
+| A local application or script | `http://127.0.0.1:8000/v1` |
+
+The detailed host, model, and troubleshooting reference is in
+[the Halo deployment guide](deploy/halo/README.md).
+
+## For advanced users
+
+### Use AgentX as a coding agent
+
+AgentX is provider-neutral and privacy-first: it limits what a model can see
+before a request leaves the CLI. The private Qwen provider has bounded,
+read-only workspace tools for listing files, reading files, literal search,
+Git status, and scoped diffs.
+
+Select the files or directories the model may inspect with `/context`:
 
 ```text
 agentx[private-openai-compatible]> /context README.md src/agentx
-Context paths: README.md, src/agentx
-agentx[private-openai-compatible]> analyze the selected code
+agentx[private-openai-compatible]> review the selected code and suggest a refactor
 ```
 
-The private OpenAI-compatible adapter exposes bounded, read-only workspace
-tools for tree listing, file reads, literal search, Git status, and scoped Git
-diffs. When the model requests one, AgentX executes it locally and sends the
-bounded result back through the provider's tool-call loop. Selected `/context`
-paths become the tool scope; sensitive files, credentials, repository state,
-and traversal paths remain blocked.
+The private provider can also call `subagent_create`, `subagent_list`, and
+`subagent_get`. A parent can create up to ten isolated children; each child has
+explicit context, its own artifacts, and cannot create grandchildren. This is
+useful for splitting a repository review into independent areas.
 
-Private-provider runs can also create and inspect child agents through
-`subagent_create`, `subagent_list`, and `subagent_get`. AgentX allows at most
-ten children per parent. Each child gets its own session/artifact directory,
-provider interaction, and explicitly selected context, then returns a summary
-to the parent. Children run at depth one and do not receive subagent tools, so
-they cannot create grandchildren.
-Codex, Claude Code, Kiro CLI, configured OpenAI-compatible endpoints, and the
-deterministic `fake-local` provider use the same read-only plan boundary and
-local AgentX audit artifacts.
+AgentX uses standard OpenAI `tool_calls` when an endpoint supplies them. For
+Qwen/vLLM combinations that emit complete raw
+`<tool_call>{...}</tool_call>` blocks instead, it safely normalizes those
+blocks, runs the approved read-only tool, and continues the same tool loop.
+Malformed or mixed prose/tool output is rejected rather than executed.
 
-For the private OpenAI-compatible provider, AgentX streams the assistant's
-response as it arrives. If the endpoint returns a separate reasoning/thinking
-field, it is shown in dim grey terminal text before the response. The complete
-response and reasoning are still saved in the run artifacts. `/quit` is the
-interactive exit command.
+Use `/providers`, `/provider`, `/context`, `/help`, and `/quit` in the
+interactive session. Run `agentx providers list` to see which optional local
+providers are available.
 
-Approval-gated patch and shell tool implementations are available as an
-explicit adapter boundary for controlled integrations. They are not enabled
-by default: patches require allowed paths and approval, while shell commands
-require approval and are executed as an argv list without a shell.
+### Use the API from another local program
 
-If the private model endpoint is missing, AgentX prints a startup warning with
-the external settings-file path and an initialization command. The default
-settings file is outside the repository; inspect its resolved location with:
+The gateway exposes an unauthenticated OpenAI-compatible API on loopback:
 
-```sh
-agentx config path
+```bash
+curl http://127.0.0.1:8000/v1/models
 ```
 
-## Provider Usage
+For example, configure an OpenAI-compatible client with:
 
-AgentX can inspect provider availability, explain a route, and run the live
-provider workflows exposed by the current CLI. Provider selection is policy-
-filtered before a provider receives context.
-
-### Codex
-
-Initialize a Codex profile, then run a read-only plan against a scoped
-workspace:
-
-```sh
-agentx init --profile codex --codex-command codex --force
-agentx providers list
-agentx plan --provider codex --context README.md \
-  "review the README and propose documentation improvements"
+```text
+base URL: http://127.0.0.1:8000/v1
+model:    Qwen/Qwen3-14B
 ```
 
-The Codex command must be installed and authenticated separately. AgentX stores
-the plan transcript and policy artifacts under the configured local state root;
-it does not apply source changes in plan mode.
+The `/v1` API is stateless: the calling program sends the conversation history
+it needs. The Web UI keeps named chats, summaries, and local cross-session
+memory in its own local SQLite database. A machine client that needs one shared
+gateway-managed conversation can use `/api/machine-chat`; see the
+[deployment guide](deploy/halo/README.md#clients).
 
-### Claude
+### Connect from another machine
 
-Claude Code can be selected for a read-only plan when its CLI is installed and
-authenticated:
+The default service is deliberately bound to `127.0.0.1`. For a remote client,
+you may create a tunnel such as `ngrok http 8000`, then configure AgentX with
+the active tunnel URL:
 
-```sh
-agentx providers list
-agentx plan --provider claude --context README.md \
-  "review the authentication module for design risks"
+```bash
+agentx init \
+  --profile private-openai-compatible \
+  --endpoint https://<current-tunnel>.ngrok-free.app/v1 \
+  --model Qwen/Qwen3-14B \
+  --timeout 900 \
+  --force
 ```
 
-AgentX invokes Claude Code in print/plan mode from a policy-scoped workspace;
-it does not enable file edits through this plan path.
+The current gateway has **no user authentication**. A public tunnel exposes
+the Web UI, chats, machine-chat endpoint, and API. Do not expose private data
+or an always-on public service until an authentication boundary is added. See
+[remote access in the deployment guide](deploy/halo/README.md#optional-remote-agentx-through-ngrok).
 
-### Kiro CLI
+### Configure a different OpenAI-compatible endpoint
 
-Kiro CLI can be selected when `kiro-cli` is installed and logged in:
+AgentX stores settings and secrets outside the repository. To connect to a
+different local or private endpoint:
 
-```sh
-agentx providers list
-agentx plan --provider kiro --context README.md \
-  "review the current implementation and identify risks"
-```
-
-AgentX invokes Kiro's non-interactive chat mode with read-only filesystem
-access for the plan workflow.
-
-### Self-hosted models
-
-For the AMD Halo deployment, use the [Halo deployment guide](deploy/halo/README.md).
-It configures the local Qwen provider automatically and keeps the Web UI and
-AgentX on the same machine. No ngrok tunnel is needed for that workflow.
-
-For another OpenAI-compatible endpoint, configure the endpoint and model in
-the external AgentX settings file:
-
-```sh
+```bash
 agentx init \
   --profile private-openai-compatible \
   --endpoint https://model.example/v1 \
@@ -197,213 +166,74 @@ agentx init \
   --force
 ```
 
-For a remote Halo endpoint, use the active ngrok URL in place of
-`https://model.example/v1`. Install and authenticate ngrok from its [official
-setup page](https://ngrok.com/), then run `ngrok http 8000` on Halo. This
-exposes the entire gateway, including the Web UI, session APIs, machine-chat
-endpoint, and `/v1` API—so do not expose it to the public internet with real
-private data until authentication is added. Free ngrok URLs can change after a
-restart; keep the updated endpoint only in external settings.
+If the endpoint requires a key, provide the *name* of an environment variable,
+never the secret itself:
 
-The settings file is outside the repository. Inspect its location with
-`agentx config path`, then verify the provider and route:
-
-```sh
-agentx providers list
-agentx plan --provider private-openai-compatible \
-  "summarize the private planner implementation"
-agentx --provider private-openai-compatible
-```
-
-The endpoint must already be running; AgentX does not provision arbitrary model
-weights, start arbitrary model servers, or manage cloud compute. If an
-OpenAI-compatible endpoint requires authentication, configure only the name of
-an environment variable with `--api-key-env`; the secret itself is read at
-runtime and is not written to settings or run artifacts:
-
-```sh
+```bash
 agentx init \
   --profile private-openai-compatible \
-  --endpoint https://<current-tunnel>.ngrok-free.app/v1 \
-  --model Qwen/Qwen3-14B \
-  --api-key-env AGENTX_QWEN_API_KEY \
-  --timeout 900 \
+  --endpoint https://model.example/v1 \
+  --model <model-id> \
+  --api-key-env AGENTX_MODEL_API_KEY \
   --force
 ```
 
-### Automatic routing across providers
+Inspect the external settings location with `agentx config path`. The command
+`agentx config show` displays the resolved non-secret configuration.
 
-Use `auto` to inspect the providers that pass availability and privacy policy
-filters:
+### Other providers and command-line use
 
-```sh
-agentx route --provider auto --mode review --explain \
-  "review the current change and identify the least expensive suitable route"
+When installed and authenticated, Codex, Claude Code, and Kiro CLI remain
+available alongside local Qwen. Provider selection is policy-filtered before
+context is sent. Common non-interactive commands are:
+
+```bash
+agentx providers list
+agentx route "summarize the routing module"
+agentx plan --provider private-openai-compatible --context README.md \
+  "plan a documentation cleanup"
+agentx --json providers list
 ```
 
-The routing library supports model profiles with economy, standard, and high
-tiers and can select the lowest-cost eligible model when a `ModelCatalog` is
-provided. The current CLI does not yet load a persistent cost catalog, so its
-automatic route command is a policy and availability dry run rather than a
-complete cost-optimized provider execution workflow. Cost-aware live routing
-will become the default once model catalog configuration and the remaining
-provider adapters are exposed through the CLI.
+`fake-local` is a deterministic offline provider for testing. Live execute/apply
+mode is not enabled; AgentX currently keeps live provider workflows read-only.
 
-## Current CLI
+### Models and operations
 
-The public CLI currently supports:
+Qwen3-14B is the default tested Halo model. A smaller 4B profile is available
+for smoke tests:
 
-- `init`: write first-run settings under the resolved AgentX state root.
-- `interactive` or `shell`: enter a provider-aware interactive task session.
-- `providers list`: inspect configured provider availability.
-- `route`: explain provider and model-tier routing without running a provider.
-- `plan --fake` or `plan --provider fake-local`: run the deterministic offline
-  plan workflow and write local artifacts.
-- `plan --provider codex`: run a live Codex CLI plan against a scoped read-only
-  workspace built from policy-visible context.
-- `plan --provider claude`: run a live Claude Code print/plan request against a
-  scoped read-only workspace.
-- `plan --provider kiro`: run a live Kiro CLI non-interactive plan with
-  read-only filesystem access.
-- `plan --provider private-openai-compatible`: run a live plan through a
-  configured local or remote OpenAI-compatible endpoint.
-- `execute --fake`: run the deterministic offline execute workflow, validate any
-  adapter patch output, and write local artifacts without applying source
-  mutations.
-- `run --fake`: run the lower-level deterministic fake adapter path.
-- `config path`: show the resolved AgentX state paths.
-- `config show`: show resolved settings.
-
-Live execution is exposed for Codex, Claude Code, Kiro CLI, and the configured
-OpenAI-compatible plan adapters. Execute/apply mode remains fake-only and never
-applies source mutations.
-
-## Privacy Model
-
-AgentX treats providers as execution backends, not as the authority for privacy.
-AgentX decides what a provider can see before a request crosses the adapter
-boundary.
-
-Implemented privacy controls include:
-
-- Policy classification for repository paths using `public`, `internal`,
-  `confidential`, `proprietary`, and `secret` levels.
-- Provider eligibility filtering based on classification, public-provider
-  defaults, private-provider settings, and explicit routing rules.
-- Context manifest compilation for external and private provider classes.
-- Path redaction and summary placeholders for withheld context.
-- Memory exposure decisions that can include, summarize, redact, or exclude
-  memories before provider visibility.
-- A private OpenAI-compatible adapter that uses Python standard-library HTTP
-  primitives and rejects base URLs containing credentials.
-- MCP per-run config generation with service visibility, tool allowlists and
-  denylists, auth path references, sanitized endpoints, and argument/result
-  redaction primitives.
-- Scoped workspace path normalization that rejects absolute paths, traversal,
-  duplicate aliases, and case-ambiguous aliases.
-- Execute-mode patch validation for allowed paths, denied paths, invalid patch
-  paths, and configured secret markers.
-- A fake offline flow for routine validation without live model calls, provider
-  subscriptions, cloud compute, or network access.
-
-## Local State
-
-AgentX keeps local state under an AgentX state root. The exact default location
-is platform-specific and intentionally treated as an implementation detail. Use
-`agentx config path` to inspect the resolved
-paths for the current environment.
-
-The state root is organized generically as:
-
-```text
-<AgentX state root>/
-  settings.json
-  sessions/
-  memories/
-  auth/
+```bash
+./deploy/halo/start-qwen3-4b-vllm.sh
 ```
 
-Environment overrides can redirect the state root or individual state areas:
+The 14B launcher enables Qwen tool calling with vLLM's `qwen3_xml` parser by
+default. Set `ENABLE_TOOL_CALLING=0` only for a chat-only server—AgentX's
+workspace and sub-agent tools need tool calling enabled. See the
+[deployment guide](deploy/halo/README.md) for environment overrides, logs,
+model cache locations, and GPU prerequisites.
 
-- `AGENTX_HOME`: AgentX state root.
-- `AGENTX_SETTINGS`: settings document path.
-- `AGENTX_SESSIONS`: run/session artifact directory.
-- `AGENTX_MEMORIES`: local memory record directory.
-- `AGENTX_AUTH`: service-scoped authentication material directory.
+### Privacy and local state
 
-Run artifacts are local by default and should not be committed unless
-intentionally exported. Plan and execute runs write artifacts such as
-`manifest.json`, `prompt.md`, `context-map.json`, `memory-map.json`,
-`redactions.json`, `provider.json`, `transcript.jsonl`, `patch.diff`,
-`cost.json`, and `outcome.json` under a session directory.
+AgentX records local audit artifacts for each run, including the scoped prompt,
+context map, transcript, provider metadata, and outcome. Its state root holds
+settings, sessions, memories, and authentication references. Use
+`agentx config path` to find the exact location or set `AGENTX_HOME`,
+`AGENTX_SETTINGS`, `AGENTX_SESSIONS`, `AGENTX_MEMORIES`, or `AGENTX_AUTH` to
+override individual locations.
 
-For private demos or local experiments, keep AgentX state outside the source
-checkout. For example, set `AGENTX_HOME` to a private state directory and store
-provider defaults, sessions, memories, and auth material there. Run
-`agentx init` for an AgentX-only fake-local profile, or
-`agentx init --profile codex --codex-command <command>` for a Codex plan profile.
-Do not create or commit a repository-local `.agentx` directory for this setup.
+Do not commit runtime settings, model caches, chat databases, tunnel URLs, or
+credentials. See the implementation for the full policy and path-redaction
+contracts.
 
-## Provider Model
+### Develop AgentX
 
-AgentX currently models these provider categories:
+AgentX is a Python 3.11+ standard-library package with no runtime dependencies.
+From a checkout with the virtual environment active:
 
-- CLI adapters for coding assistants exposed as local commands.
-- Local or private-cloud OpenAI-compatible model endpoints.
-- Deterministic fake local adapters for offline tests and examples.
-
-The default provider registry can report availability for Codex CLI, Claude
-Code, Kiro CLI, and a private OpenAI-compatible endpoint. Provider status is
-based on configured settings, command discovery, endpoint configuration, and
-optional auth or subscription checks.
-
-Cloud compute providers and live private model lifecycle management are future
-or optional wiring. Public documentation should describe them as adapter
-contracts until user-facing commands exist.
-
-## Configuration
-
-Settings may be JSON, or simple YAML for supported scalar and list fields. The
-resolved settings include:
-
-```json
-{
-  "public_providers": ["codex", "claude", "kiro"],
-  "private_provider": "private-openai-compatible",
-  "external_max_classification": "internal",
-  "providers": {
-    "private-openai-compatible": {
-      "endpoint": "https://example.invalid",
-      "model": "Qwen/Qwen3-14B",
-      "timeout": 900,
-      "enabled": true
-    }
-  }
-}
-```
-
-Provider IDs are configuration data. Do not assume one public provider is the
-only viable execution path.
-
-The CLI can write common profiles:
-
-```sh
-agentx init
-agentx init --profile codex --codex-command codex --force
-agentx init --profile private-openai-compatible \
-  --endpoint http://127.0.0.1:8000/v1 --model Qwen/Qwen3-14B --force
-```
-
-`init` refuses to overwrite an existing settings file unless `--force` is
-passed.
-
-## Development
-
-Run tests from a checkout with `src` importable:
-
-```sh
+```bash
 python -m unittest discover -s tests
 ```
 
-Routine tests use deterministic fixtures and fakes. They should not require live
-provider credentials, subscriptions, cloud infrastructure, or network access.
+Tests use local fixtures and do not require a live model, provider subscription,
+or network connection.
