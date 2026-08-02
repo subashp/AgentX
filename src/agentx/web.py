@@ -82,16 +82,28 @@ class WebUIAdapter:
     the browser event stream by default.
     """
 
-    def __init__(self, service: WebAccessService) -> None:
+    def __init__(self, service: WebAccessService, *, browser: Any = None) -> None:
         if not isinstance(service, WebAccessService):
             raise ToolError("service must be a WebAccessService")
+        if browser is not None and (not hasattr(browser, "specs") or not callable(getattr(browser, "call", None))):
+            raise ToolError("browser must provide specs and call()")
         self.service = service
+        self.browser = browser
 
     @property
     def specs(self) -> tuple[ToolSpec, ...]:
-        return self.service.specs
+        specs = list(self.service.specs)
+        if self.browser is not None:
+            names = {spec.name for spec in specs}
+            for spec in self.browser.specs:
+                if spec.name in names:
+                    raise ToolError(f"duplicate web UI tool name: {spec.name}")
+                specs.append(spec)
+        return tuple(specs)
 
     def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
+        if self.browser is not None and any(spec.name == name for spec in self.browser.specs):
+            return self.browser.call(name, arguments)
         return self.service.call(name, arguments)
 
     @staticmethod

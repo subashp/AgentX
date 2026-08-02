@@ -37,6 +37,7 @@ from .tools import (
     ReadOnlyWorkspaceTools,
     ToolError,
 )
+from .browser import BrowserToolExecutor
 from .web import WebAccessService
 from .workspace import WorkspaceError, normalize_scoped_path
 from .providers import ProviderRegistry
@@ -859,6 +860,12 @@ def _plan(
             tool_executors = [read_only_tools]
             if web_approval is not None:
                 tool_executors.append(WebAccessService(approval_callback=web_approval))
+                tool_executors.append(
+                    BrowserToolExecutor(
+                        artifacts_dir=SessionStore(settings.paths).path_for_session(session_id) / "artifacts",
+                        approval_callback=web_approval,
+                    )
+                )
             tool_executors.append(SubagentTools(subagent_manager))
             adapter = OpenAICompatibleAdapter(
                 base_url=endpoint,
@@ -979,6 +986,12 @@ class _PrivateSubagentRunner:
         child_tool_executors = [child_tools]
         if self.web_approval is not None:
             child_tool_executors.append(WebAccessService(approval_callback=self.web_approval))
+            child_tool_executors.append(
+                BrowserToolExecutor(
+                    artifacts_dir=self.session_store.path_for_session(session_id) / "artifacts",
+                    approval_callback=self.web_approval,
+                )
+            )
         child_adapter = OpenAICompatibleAdapter(
             base_url=self.base_url,
             model=self.model,

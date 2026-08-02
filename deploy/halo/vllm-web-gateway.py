@@ -30,6 +30,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from agentx.tools import ToolResult
+from agentx.browser import BrowserToolExecutor
 from agentx.web import WebAccessService, WebUIAdapter
 
 # Keep the historical module-level name for integrations and tests that
@@ -125,6 +126,8 @@ BROWSER_WEB_TOOL_DESCRIPTIONS = {
     ),
 }
 
+WEB_ARTIFACTS_DIR = Path(os.environ.get("AGENTX_HOME", str(Path.home() / ".agentx"))) / "artifacts"
+
 
 def _build_web_ui_adapter() -> WebUIAdapter:
     """Build the UI adapter with the gateway's explicit web policy callback."""
@@ -132,7 +135,11 @@ def _build_web_ui_adapter() -> WebUIAdapter:
     service = WebAccessService(
         research_tools=WebResearchTools(approval_callback=lambda operation, details: True)
     )
-    return WebUIAdapter(service)
+    browser = BrowserToolExecutor(
+        artifacts_dir=WEB_ARTIFACTS_DIR / "browser",
+        approval_callback=lambda operation, details: True,
+    )
+    return WebUIAdapter(service, browser=browser)
 
 
 def browser_web_tool_specs() -> tuple[dict, ...]:
@@ -141,7 +148,8 @@ def browser_web_tool_specs() -> tuple[dict, ...]:
     for spec in adapter.specs:
         payload = spec.as_dict()
         function = payload["function"]
-        function["description"] = BROWSER_WEB_TOOL_DESCRIPTIONS[function["name"]]
+        if function["name"] in BROWSER_WEB_TOOL_DESCRIPTIONS:
+            function["description"] = BROWSER_WEB_TOOL_DESCRIPTIONS[function["name"]]
         specs.append(payload)
     return tuple(specs)
 

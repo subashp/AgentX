@@ -25,8 +25,10 @@ gateway = _load_gateway_module()
 class HaloWebGatewayTests(unittest.TestCase):
     def test_web_tools_are_advertised_to_vllm(self):
         tools = {item["function"]["name"]: item for item in gateway.WEB_TOOL_SPECS}
-        self.assertEqual({"web_search", "web_fetch"}, set(tools))
-        for spec in tools.values():
+        self.assertTrue({"web_search", "web_fetch"}.issubset(tools))
+        self.assertIn("browser_open", tools)
+        for name in ("web_search", "web_fetch"):
+            spec = tools[name]
             description = spec["function"]["description"].lower()
             self.assertIn("already permitted", description)
             self.assertNotIn("approval", description)
