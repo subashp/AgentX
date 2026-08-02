@@ -594,6 +594,31 @@ class CliTests(unittest.TestCase):
         self.assertIn("Context paths set:\n  README.md\n  src/agentx\n", stdout.getvalue())
         self.assertIn("Context paths:\n  README.md\n  src/agentx\n", stdout.getvalue())
 
+    def test_interactive_slash_command_completion_tree(self):
+        tree = cli._slash_command_completion_tree(("auto", "codex", "private-openai-compatible"))
+
+        self.assertIn("/provider", tree)
+        self.assertIn("codex", tree["/provider"])
+        self.assertIn("/memory", tree)
+        self.assertIn("remember", tree["/memory"])
+        self.assertIn("--class", tree["/memory"]["remember"])
+        self.assertIn("private", tree["/memory"]["remember"]["--class"])
+        self.assertIn("/tools", tree)
+        self.assertIn("/execute", tree)
+        self.assertIn("/quit", tree)
+
+    def test_interactive_line_reader_falls_back_for_non_tty(self):
+        stdout = io.StringIO()
+        line = cli._read_interactive_line(
+            "agentx[auto]> ",
+            io.StringIO("/quit\n"),
+            stdout,
+            provider_ids=("auto", "codex"),
+        )
+
+        self.assertEqual("/quit\n", line)
+        self.assertEqual("agentx[auto]> ", stdout.getvalue())
+
     def test_interactive_memory_commands_round_trip(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

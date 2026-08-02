@@ -47,6 +47,18 @@ from .routing import AgentRun, RouteValidationError, Router
 from .store import SessionStore, SettingsStore, StoreError
 
 
+_INTERACTIVE_SLASH_COMMANDS = (
+    "/provider",
+    "/providers",
+    "/context",
+    "/memory",
+    "/tools",
+    "/execute",
+    "/help",
+    "/quit",
+)
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="agentx", description="Provider-neutral agentic coding gateway")
     parser.add_argument("--json", action="store_true", help="write machine-readable JSON output")
@@ -432,8 +444,12 @@ def _interactive(
     request_cancellation = _InteractiveRequestCancellation(stdin, stdout)
 
     while True:
-        stdout.write(f"\nagentx[{selected_provider}]> ")
-        line = stdin.readline()
+        line = _read_interactive_line(
+            f"\nagentx[{selected_provider}]> ",
+            stdin,
+            stdout,
+            provider_ids=provider_ids,
+        )
         if line == "":
             stdout.write("\n")
             return 0
@@ -626,6 +642,64 @@ def _write_custom_provider_startup_warning(settings, statuses, stdout) -> None:
         )
     else:
         stdout.write("Check the endpoint and model settings before selecting the custom provider.\n")
+
+
+def _slash_command_completion_tree(provider_ids: Sequence[str]) -> dict[str, object]:
+    provider_tree = {provider_id: None for provider_id in provider_ids}
+    memory_class_tree = {"generic": None, "team": None, "private": None}
+    tree = {command: None for command in _INTERACTIVE_SLASH_COMMANDS}
+    tree.update({
+        "/provider": provider_tree,
+        "/context": {"clear": None},
+        "/memory": {
+            "search": None,
+            "remember": {"--class": memory_class_tree},
+            "show": None,
+            "correct": None,
+            "forget": {"--all": None},
+            "proposals": None,
+            "apply": None,
+        },
+    })
+    return tree
+
+
+def _read_interactive_line(
+    prompt_text: str,
+    stdin: TextIO,
+    stdout: TextIO,
+    *,
+    provider_ids: Sequence[str],
+) -> str:
+    if stdin is not sys.stdin or stdout is not sys.stdout:
+        stdout.write(prompt_text)
+        return stdin.readline()
+    stdin_isatty = getattr(stdin, "isatty", None)
+    stdout_isatty = getattr(stdout, "isatty", None)
+    if not callable(stdin_isatty) or not stdin_isatty():
+        stdout.write(prompt_text)
+        return stdin.readline()
+    if not callable(stdout_isatty) or not stdout_isatty():
+        stdout.write(prompt_text)
+        return stdin.readline()
+
+    try:
+        from prompt_toolkit import PromptSession
+        from prompt_toolkit.completion import NestedCompleter
+    except ImportError:
+        stdout.write(prompt_text)
+        return stdin.readline()
+
+    try:
+        session = PromptSession(
+            completer=NestedCompleter.from_nested_dict(
+                _slash_command_completion_tree(provider_ids)
+            ),
+            complete_while_typing=False,
+        )
+        return session.prompt(prompt_text) + "\n"
+    except EOFError:
+        return ""
 
 
 def _interactive_memory(prompt: str, settings, stdout: TextIO, stderr: TextIO) -> None:

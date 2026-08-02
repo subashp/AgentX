@@ -30,7 +30,7 @@ git clone --recurse-submodules https://github.com/subashp/AgentX.git
 cd AgentX
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --editable .
+python -m pip install --editable ".[interactive]"
 python -m pip install --editable third_party/AgentMemory
 ```
 
@@ -280,11 +280,14 @@ policy. `generic` maps to public memory, `team` maps to internal memory, and
 
 ### Develop AgentX
 
-AgentX is a Python 3.11+ standard-library package with no runtime dependencies.
-From a checkout with the virtual environment active:
+AgentX is a Python 3.11+ package with no required runtime dependencies. Install
+the optional `interactive` extra when you want Tab completion for interactive
+slash commands such as `/provider`, `/memory`, `/tools`, `/execute`, and
+`/quit`. From a checkout with the virtual environment active:
 
 ```bash
 git submodule update --init --recursive
+python -m pip install -e ".[interactive]"
 python -m pip install -e third_party/AgentMemory
 python -m unittest discover -s tests
 ```

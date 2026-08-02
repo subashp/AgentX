@@ -12,6 +12,7 @@ requires-python = ">=3.11"
 dependencies = []
 
 [project.optional-dependencies]
+interactive = ["prompt_toolkit>=3.0"]
 web = ["pypdf>=5"]
 browser = ["playwright>=1.40"]
 
