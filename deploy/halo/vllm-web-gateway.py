@@ -29,7 +29,12 @@ SOURCE_ROOT = REPOSITORY_ROOT / "src"
 if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
-from agentx.tools import ToolResult, WebResearchTools
+from agentx.tools import ToolResult
+from agentx.web import WebAccessService
+
+# Keep the historical module-level name for integrations and tests that
+# replace the web executor. New code should use WebAccessService directly.
+WebResearchTools = WebAccessService
 
 
 UPSTREAM_HOST = os.environ.get("VLLM_UPSTREAM_HOST", "127.0.0.1")

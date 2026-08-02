@@ -1,0 +1,77 @@
+"""Shared public-web access service for AgentX front ends.
+
+The service is deliberately independent of a terminal, HTTP handler, or UI.
+Those surfaces provide an approval callback and consume the same bounded tool
+contract.  ``WebResearchTools`` remains the compatibility implementation for
+existing integrations while callers migrate to this boundary.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Mapping
+from typing import Any
+
+from .tools import ToolError, ToolResult, ToolSpec, WebResearchTools
+
+
+class WebAccessError(RuntimeError):
+    """Raised when a shared web operation cannot produce a valid result."""
+
+
+class WebAccessService:
+    """Provider-neutral public-web service shared by CLI and UI adapters.
+
+    ``research_tools`` is injectable so UI and test adapters can share this
+    service without making live network requests.  The default preserves the
+    existing AgentX public-HTTPS, approval, redirect, and response limits.
+    """
+
+    def __init__(
+        self,
+        *,
+        approval_callback: Any = None,
+        opener: Any = None,
+        resolver: Any = None,
+        research_tools: Any = None,
+    ) -> None:
+        if research_tools is None:
+            research_tools = WebResearchTools(
+                approval_callback=approval_callback,
+                opener=opener,
+                resolver=resolver,
+            )
+        if not hasattr(research_tools, "specs") or not callable(getattr(research_tools, "call", None)):
+            raise ToolError("research_tools must provide specs and call()")
+        self._research_tools = research_tools
+
+    @property
+    def specs(self) -> tuple[ToolSpec, ...]:
+        """Return the model-facing tools enabled for this service instance."""
+
+        return tuple(self._research_tools.specs)
+
+    def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
+        """Execute a model-facing web tool through the shared service."""
+
+        return self._research_tools.call(name, arguments)
+
+    def search(self, query: str, *, max_results: int = 5) -> dict[str, object]:
+        """Search the public web and return a normalized bounded payload."""
+
+        return self._require_mapping(self.call("web_search", {"query": query, "max_results": max_results}))
+
+    def fetch(self, url: str, *, max_chars: int = 4_000) -> dict[str, object]:
+        """Fetch a public HTTPS page and return bounded extracted text."""
+
+        return self._require_mapping(self.call("web_fetch", {"url": url, "max_chars": max_chars}))
+
+    @staticmethod
+    def _require_mapping(result: ToolResult) -> dict[str, object]:
+        if not result.ok:
+            raise WebAccessError(result.error or "web operation failed")
+        if not isinstance(result.output, Mapping):
+            raise WebAccessError("web operation returned an invalid result")
+        return dict(result.output)
+
+
+__all__ = ["WebAccessError", "WebAccessService"]
