@@ -43,6 +43,7 @@ from .subagents import SubagentManager, SubagentTask, SubagentTools
 from .tools import (
     ApprovalCallback,
     CompositeToolExecutor,
+    ControlledWorkspaceTools,
     ReadOnlyWorkspaceTools,
     ToolError,
 )
@@ -453,7 +454,7 @@ def _interactive(
         if command in {"/help", "help"}:
             stdout.write(
                 "Commands: /provider [id|auto], /providers, /context [clear|path...], "
-                "/memory [search|remember|show|correct|forget|proposals|apply], /help, /quit. "
+                "/memory [search|remember|show|correct|forget|proposals|apply], /execute <task>, /help, /quit. "
                 "Any other input is treated as a coding task; press Esc while a private-model request is active to cancel it.\n"
             )
             continue
@@ -483,6 +484,39 @@ def _interactive(
             continue
         if command == "/memory" or command.startswith("/memory "):
             _interactive_memory(prompt, settings, stdout, stderr)
+            continue
+        if command.startswith("/execute "):
+            execute_prompt = prompt.split(maxsplit=1)[1].strip()
+            if not execute_prompt:
+                stderr.write("agentx: /execute requires a task prompt.\n")
+                continue
+            session_id = f"interactive-{uuid.uuid4().hex[:12]}"
+            task_provider = selected_provider
+            if selected_provider == "auto":
+                task_provider = _select_auto_interactive_provider(settings, statuses)
+            if task_provider != "private-openai-compatible":
+                stderr.write("agentx: /execute currently requires provider private-openai-compatible.\n")
+                continue
+            try:
+                _plan(
+                    execute_prompt,
+                    task_provider,
+                    None,
+                    session_id,
+                    ".",
+                    None,
+                    context_paths,
+                    settings,
+                    False,
+                    stdout,
+                    stderr,
+                    interactive_output=True,
+                    web_approval=web_approval,
+                    request_cancellation=request_cancellation,
+                    enable_patch_tool=True,
+                )
+            except KeyboardInterrupt:
+                stdout.write("\nRequest cancelled. Returning to AgentX.\n")
             continue
         if command == "/context" or command.startswith("/context "):
             parts = prompt.split(maxsplit=1)
@@ -857,6 +891,8 @@ def _plan(
     interactive_output: bool = False,
     web_approval: ApprovalCallback | None = None,
     request_cancellation: RequestCancellation | None = None,
+    enable_patch_tool: bool = False,
+    enable_shell_tool: bool = False,
 ) -> int:
     try:
         if provider == "fake-local":
@@ -956,10 +992,19 @@ def _plan(
                 else None
             )
             scoped_source_root = Path(source_root)
-            read_only_tools = ReadOnlyWorkspaceTools(
-                scoped_source_root,
-                allowed_paths=context_paths,
-            )
+            if enable_patch_tool or enable_shell_tool:
+                read_only_tools = ControlledWorkspaceTools(
+                    scoped_source_root,
+                    allowed_paths=context_paths,
+                    approval_callback=web_approval,
+                    enable_patch=enable_patch_tool,
+                    enable_shell=enable_shell_tool,
+                )
+            else:
+                read_only_tools = ReadOnlyWorkspaceTools(
+                    scoped_source_root,
+                    allowed_paths=context_paths,
+                )
             subagent_manager = SubagentManager(
                 parent_session_id=session_id,
                 runner=_PrivateSubagentRunner(

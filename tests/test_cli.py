@@ -727,6 +727,46 @@ class CliTests(unittest.TestCase):
         self.assertTrue(plan.call_args.kwargs["interactive_output"])
         self.assertTrue(callable(plan.call_args.kwargs["web_approval"]))
 
+    def test_interactive_execute_enables_patch_tool_for_private_provider(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_interactive_execute"
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            ),
+            private_provider="private-openai-compatible",
+        )
+        statuses = (
+            ProviderStatus(
+                "private-openai-compatible",
+                "Private",
+                "openai_compatible",
+                True,
+                "available",
+            ),
+        )
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                with mock.patch("agentx.cli._plan") as plan:
+                    code = cli.run(
+                        ["interactive", "--provider", "private-openai-compatible"],
+                        stdout,
+                        stderr,
+                        io.StringIO("/context README.md\n/execute patch README\n/quit\n"),
+                    )
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        self.assertEqual("patch README", plan.call_args.args[0])
+        self.assertTrue(plan.call_args.kwargs["enable_patch_tool"])
+
     def test_interactive_web_approval_shows_request_and_requires_yes(self):
         class FlushTrackingStringIO(io.StringIO):
             def __init__(self):

@@ -1017,6 +1017,8 @@ class ControlledWorkspaceTools(ReadOnlyWorkspaceTools):
         approval: ApprovalCallback | None = None,
         approval_callback: ApprovalCallback | None = None,
         denied_paths: Sequence[str] = (),
+        enable_patch: bool = True,
+        enable_shell: bool = True,
     ) -> None:
         super().__init__(root, allowed_paths=allowed_paths)
         if approval is not None and approval_callback is not None and approval is not approval_callback:
@@ -1029,15 +1031,26 @@ class ControlledWorkspaceTools(ReadOnlyWorkspaceTools):
             self.denied_paths = tuple(normalize_scoped_path(path, "denied_path") for path in denied_paths)
         except WorkspaceError as exc:
             raise ToolError(str(exc)) from exc
+        self.enable_patch = bool(enable_patch)
+        self.enable_shell = bool(enable_shell)
 
     @property
     def specs(self) -> tuple[ToolSpec, ...]:
-        return READ_ONLY_TOOL_SPECS + CONTROLLED_TOOL_SPECS
+        specs = list(READ_ONLY_TOOL_SPECS)
+        if self.enable_patch:
+            specs.append(CONTROLLED_TOOL_SPECS[0])
+        if self.enable_shell:
+            specs.append(CONTROLLED_TOOL_SPECS[1])
+        return tuple(specs)
 
     def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
         if name in {"workspace.patch", "workspace_patch"}:
+            if not self.enable_patch:
+                return ToolResult(name="workspace.patch", ok=False, error="patch tool is disabled")
             return self.apply_patch(dict(arguments or {}))
         if name in {"shell.exec", "shell_exec"}:
+            if not self.enable_shell:
+                return ToolResult(name="shell.exec", ok=False, error="shell tool is disabled")
             return self.exec_shell(dict(arguments or {}))
         return super().call(name, arguments)
 

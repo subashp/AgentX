@@ -290,6 +290,23 @@ class ControlledWorkspaceToolsTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual("print('before')\n", (self.root / "src" / "main.py").read_text(encoding="utf-8"))
 
+    def test_controlled_tools_can_expose_patch_without_shell(self):
+        approve, _calls = self._approval(True)
+        tools = ControlledWorkspaceTools(
+            self.root,
+            allowed_paths=("src/main.py",),
+            approval_callback=approve,
+            enable_patch=True,
+            enable_shell=False,
+        )
+
+        names = {spec.name for spec in tools.specs}
+        self.assertIn("workspace_patch", names)
+        self.assertNotIn("shell_exec", names)
+        result = tools.call("shell_exec", {"argv": ["python", "--version"]})
+        self.assertFalse(result.ok)
+        self.assertIn("disabled", result.error)
+
     def test_patch_validation_rejects_out_of_scope_path_before_approval(self):
         approve, calls = self._approval(True)
         tools = ControlledWorkspaceTools(
