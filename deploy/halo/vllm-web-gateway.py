@@ -778,9 +778,10 @@ class Handler(BaseHTTPRequestHandler):
             base_conversation = [dict(message) for message in conversation]
             prefetched_result: tuple[str, ToolResult] | None = None
             force_final_reply = False
+            web_adapter = _build_web_ui_adapter() if web_tools_available else None
             if web_tools_available and (research_request := browser_research_request(content)):
                 research_name, research_arguments = research_request
-                web_adapter = _build_web_ui_adapter()
+                assert web_adapter is not None
                 prefetched_result = (research_name, web_adapter.call(research_name, research_arguments))
                 conversation = web_result_followup(base_conversation, [prefetched_result])
                 force_final_reply = True
@@ -894,7 +895,7 @@ class Handler(BaseHTTPRequestHandler):
                     if tool_round >= MAX_WEB_TOOL_ROUNDS:
                         raise RuntimeError(f"model exceeded the {MAX_WEB_TOOL_ROUNDS}-round web-tool limit")
 
-                    web_adapter = _build_web_ui_adapter()
+                    assert web_adapter is not None
                     results: list[tuple[str, ToolResult]] = []
                     for call in calls:
                         arguments = call["arguments"]
