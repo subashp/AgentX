@@ -5,8 +5,7 @@ Created: 2026-08-02
 Branch: `feature/reusable-memory-plan`
 Canonical implementation repo: `git@github.com:subashp/AgentMemory.git`
 Prototype integration consumer: AgentX
-Next integration target: `demo/` physical AI / machine-intelligence stack
-Later candidate consumers: Nemmadi, other agentic runtimes
+Future integration targets: other agentic runtimes, including C++ machine clients
 
 ## Purpose
 
@@ -19,10 +18,7 @@ boundaries.
 The module should start as its own repository from the beginning:
 `git@github.com:subashp/AgentMemory.git`. AgentX is the first integration client,
 not the long-term owner of the memory implementation. This keeps the API clean
-enough for the `demo/` machine-intelligence repo, which is C++-heavy and
-currently lacks a durable memory layer. Nemmadi already has its own
-healthcare-oriented memory system, so it should be treated as a later candidate
-and reference point rather than a near-term migration target.
+enough for other Python and non-Python agent runtimes.
 
 ## Product Goals
 
@@ -99,26 +95,11 @@ Current gaps:
 - There is no first-class correction, memory proposal, item-level provenance, or
   full deletion workflow.
 
-## Cross-Repo Priority And Lessons
+## Reusable Consumer Priority And Lessons
 
-AgentX is the prototype host and first integration. The `demo/` repo is the
-next target because it represents the real machine-intelligence use case and
-needs memory. Nemmadi is useful research input, but not a near-term migration
-priority.
-
-Nemmadi has practical application memory:
-
-- short-term and long-term records
-- local SQLite plus Supabase sync
-- token-budget-aware prompt inclusion
-- delete/reset flows
-
-Do not over-index on Nemmadi or copy its email-keyed schema directly. A reusable
-library should use opaque subject IDs and optional identity metadata. Healthcare
-memory policy remains useful as an example of domain-specific constraints, but
-it should not drive the first implementation.
-
-Demo has the physical AI safety shape and should be the second integration:
+AgentX is the prototype host and first integration. The next integration class
+is C++-heavy machine intelligence clients that need a durable memory layer.
+Those clients require:
 
 - memory classes
 - provenance
@@ -442,8 +423,7 @@ Example:
       "remote_model_profiles": [
         "Qwen/Qwen3-14B",
         "Qwen/Qwen3-4B"
-      ],
-      "integration_target": "demo_cpp_runtime"
+      ]
     }
   },
   "prompt_budget": {
@@ -810,10 +790,10 @@ Gate:
 - local-only mode remains default
 - sync delete propagation tested with fake backend
 
-### AM-009: Demo C++ Integration Boundary
+### AM-009: C++ Integration Boundary
 
-Goal: define and prove the integration path for the `demo/` C++ machine
-intelligence stack.
+Goal: define and prove the integration path for C++ machine intelligence
+clients.
 
 Gate:
 
@@ -828,7 +808,8 @@ Gate:
 
 ### AM-010: Split-Out Readiness
 
-Goal: confirm the package can be consumed by AgentX and later by `demo/`.
+Goal: confirm the package can be consumed by AgentX and later by other
+agentic runtimes.
 
 Gate:
 
