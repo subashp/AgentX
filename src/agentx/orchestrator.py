@@ -5,6 +5,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, replace
 from pathlib import Path
 
+from .agentmemory_bridge import merge_agentmemory_records
 from .adapters import (
     AdapterRequest,
     AdapterResult,
@@ -122,6 +123,7 @@ def execute_plan_mode(
         raise OrchestratorError("session_store must be a SessionStore.")
 
     plan_run = _build_plan_run(prompt=prompt, run=run, context_paths=context_paths)
+    active_memories = merge_agentmemory_records(memories, settings.paths.memories)
     statuses = _normalize_provider_statuses(provider_statuses)
     active_policy = policy or _default_policy(settings)
     active_router = router or Router(
@@ -143,7 +145,7 @@ def execute_plan_mode(
         provider_class=provider_class,
         requested_paths=plan_run.context_paths,
         inferred_paths=inferred_context_paths,
-        memories=memories,
+        memories=active_memories,
     )
     context_map = _context_map_from_manifest(context_manifest, route)
     memory_map = _memory_map_from_manifest(context_manifest)
@@ -231,6 +233,7 @@ def execute_execute_mode(
         raise OrchestratorError("session_store must be a SessionStore.")
 
     execute_run = _build_execute_run(prompt=prompt, run=run, context_paths=context_paths)
+    active_memories = merge_agentmemory_records(memories, settings.paths.memories)
     statuses = _normalize_provider_statuses(provider_statuses)
     active_policy = policy or _default_policy(settings)
     active_router = router or Router(
@@ -252,7 +255,7 @@ def execute_execute_mode(
         provider_class=provider_class,
         requested_paths=execute_run.context_paths,
         inferred_paths=inferred_context_paths,
-        memories=memories,
+        memories=active_memories,
     )
     context_map = _context_map_from_manifest(context_manifest, route)
     memory_map = _memory_map_from_manifest(context_manifest)

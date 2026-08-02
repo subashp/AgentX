@@ -26,11 +26,18 @@ Clone the repository and use a virtual environment. The virtual environment is
 intentional: Ubuntu prevents `pip` from changing its system Python installation.
 
 ```bash
-git clone https://github.com/subashp/AgentX.git
+git clone --recurse-submodules https://github.com/subashp/AgentX.git
 cd AgentX
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install --editable .
+python -m pip install --editable third_party/AgentMemory
+```
+
+For an existing checkout, initialize third-party modules before installing:
+
+```bash
+git submodule update --init --recursive
 ```
 
 Prepare the host, then start the model and local gateway:
@@ -252,12 +259,33 @@ Do not commit runtime settings, model caches, chat databases, tunnel URLs, or
 credentials. See the implementation for the full policy and path-redaction
 contracts.
 
+### Shared memory module
+
+AgentX includes AgentMemory as a Git submodule under
+`third_party/AgentMemory`. AgentMemory is the reusable local-first memory
+library for explicit long-term memories, persona/preferences, privacy classes
+(`generic`, `team`, `private`), correction/deletion, prompt assembly, and a
+JSON process/API boundary for non-Python clients.
+
+Install it from a full checkout with:
+
+```bash
+python -m pip install -e third_party/AgentMemory
+```
+
+When an AgentMemory SQLite database exists at the AgentX memory state path,
+AgentX can translate those records into its existing provider-visible context
+policy. `generic` maps to public memory, `team` maps to internal memory, and
+`private` maps to secret/local-only memory.
+
 ### Develop AgentX
 
 AgentX is a Python 3.11+ standard-library package with no runtime dependencies.
 From a checkout with the virtual environment active:
 
 ```bash
+git submodule update --init --recursive
+python -m pip install -e third_party/AgentMemory
 python -m unittest discover -s tests
 ```
 
