@@ -30,7 +30,6 @@ from .adapters import (
 )
 from .config import ConfigError, ProviderSettings, Settings, load_settings
 from .memory import (
-    AgentMemoryTools,
     AgentXMemoryError,
     append_interaction_events,
     apply_memory_proposal,
@@ -40,15 +39,8 @@ from .memory import (
 from .openai_compatible import OpenAICompatibleAdapter, RequestCancellation
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
 from .subagents import SubagentManager, SubagentTask, SubagentTools
-from .tools import (
-    ApprovalCallback,
-    CompositeToolExecutor,
-    ControlledWorkspaceTools,
-    ReadOnlyWorkspaceTools,
-    ToolError,
-)
-from .browser import BrowserToolExecutor
-from .web import WebAccessService
+from .tools import ApprovalCallback, ToolError
+from .tool_registry import build_private_tool_executor
 from .workspace import WorkspaceError, normalize_scoped_path
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
@@ -993,19 +985,6 @@ def _plan(
                 else None
             )
             scoped_source_root = Path(source_root)
-            if enable_patch_tool or enable_shell_tool:
-                read_only_tools = ControlledWorkspaceTools(
-                    scoped_source_root,
-                    allowed_paths=context_paths,
-                    approval_callback=web_approval,
-                    enable_patch=enable_patch_tool,
-                    enable_shell=enable_shell_tool,
-                )
-            else:
-                read_only_tools = ReadOnlyWorkspaceTools(
-                    scoped_source_root,
-                    allowed_paths=context_paths,
-                )
             subagent_manager = SubagentManager(
                 parent_session_id=session_id,
                 runner=_PrivateSubagentRunner(
@@ -1020,17 +999,17 @@ def _plan(
                     request_cancellation=request_cancellation,
                 ),
             )
-            tool_executors = [read_only_tools]
-            tool_executors.append(AgentMemoryTools(settings.paths, user_prompt=prompt))
-            if web_approval is not None:
-                tool_executors.append(WebAccessService(approval_callback=web_approval))
-                tool_executors.append(
-                    BrowserToolExecutor(
-                        artifacts_dir=SessionStore(settings.paths).path_for_session(session_id) / "artifacts",
-                        approval_callback=web_approval,
-                    )
-                )
-            tool_executors.append(SubagentTools(subagent_manager))
+            tool_mode = "execute" if enable_patch_tool or enable_shell_tool else "plan"
+            tool_executor = build_private_tool_executor(
+                mode=tool_mode,
+                workspace_root=scoped_source_root,
+                context_paths=context_paths,
+                paths=settings.paths,
+                user_prompt=prompt,
+                approval_callback=web_approval,
+                artifacts_dir=SessionStore(settings.paths).path_for_session(session_id) / "artifacts",
+                extra_executors=(SubagentTools(subagent_manager),),
+            )
             adapter = OpenAICompatibleAdapter(
                 base_url=endpoint,
                 model=provider_settings.model,
@@ -1049,7 +1028,7 @@ def _plan(
                     if not json_output
                     else None
                 ),
-                tool_executor=CompositeToolExecutor(*tool_executors),
+                tool_executor=tool_executor,
                 request_cancellation=request_cancellation,
             )
 
@@ -1166,22 +1145,6 @@ class _PrivateSubagentRunner:
             context_paths=task.context_paths,
             task_hints=task.task_hints,
         )
-        child_tools = ReadOnlyWorkspaceTools(
-            self.source_root,
-            allowed_paths=task.context_paths,
-        )
-        child_tool_executors = [child_tools]
-        child_tool_executors.append(
-            AgentMemoryTools(self.session_store.paths, user_prompt=task.prompt)
-        )
-        if self.web_approval is not None:
-            child_tool_executors.append(WebAccessService(approval_callback=self.web_approval))
-            child_tool_executors.append(
-                BrowserToolExecutor(
-                    artifacts_dir=self.session_store.path_for_session(session_id) / "artifacts",
-                    approval_callback=self.web_approval,
-                )
-            )
         child_adapter = OpenAICompatibleAdapter(
             base_url=self.base_url,
             model=self.model,
@@ -1190,7 +1153,15 @@ class _PrivateSubagentRunner:
             provider_id=self.provider_id,
             context_root=self.source_root,
             stream=False,
-            tool_executor=CompositeToolExecutor(*child_tool_executors),
+            tool_executor=build_private_tool_executor(
+                mode="plan",
+                workspace_root=self.source_root,
+                context_paths=task.context_paths,
+                paths=self.session_store.paths,
+                user_prompt=task.prompt,
+                approval_callback=self.web_approval,
+                artifacts_dir=self.session_store.path_for_session(session_id) / "artifacts",
+            ),
             request_cancellation=self.request_cancellation,
         )
         stored = execute_adapter_run(
