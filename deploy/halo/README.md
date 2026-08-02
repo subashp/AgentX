@@ -104,9 +104,20 @@ The 4B smoke-test profile is also available:
 ## Clients
 
 The Web UI is available at `http://127.0.0.1:8000/`. It saves sessions in
-`~/vllm-chat.sqlite3`, retains the original transcript for display, compresses
+`~/.agentx/vllm-chat.sqlite3`, retains the original transcript for display, compresses
 older context, and keeps a small cross-session memory. Runtime database files
 must remain local.
+
+When a browser chat needs current public information, Qwen can request the
+same bounded `web_search` and `web_fetch` tools available to AgentX. The UI
+permits these requests automatically; a generic request searches DuckDuckGo
+(with a Brave fallback), while a named site is fetched directly. The bounded
+result is then supplied to Qwen for its answer. AgentX CLI continues to ask
+for confirmation before every web request, and external/machine API clients
+do not receive these browser web tools. The UI is still limited to public
+HTTPS pages and bounded output, but an unauthenticated public tunnel lets any
+visitor induce those requests, so do not expose it publicly until authentication
+is configured.
 
 External OpenAI-compatible clients use the standard endpoint:
 

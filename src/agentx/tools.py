@@ -215,7 +215,7 @@ CONTROLLED_TOOL_SPECS: tuple[ToolSpec, ...] = (
 WEB_RESEARCH_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "web_search",
-        "Search the public web for current information when the user did not name a website or URL. Uses DuckDuckGo and requires user approval for every request.",
+        "Search the public web for current information when the user did not name a website or URL. Uses DuckDuckGo. Call this tool directly when needed: the client independently asks the user to approve the exact query after you request it, so do not ask for or wait for approval yourself.",
         {
             "type": "object",
             "required": ["query"],
@@ -227,7 +227,7 @@ WEB_RESEARCH_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ),
     ToolSpec(
         "web_fetch",
-        "Fetch a public HTTPS page as bounded plain text. Use this when the user names a specific website or URL. Requires user approval for every request.",
+        "Fetch a public HTTPS page as bounded plain text. Use this when the user names a specific website or URL. Call this tool directly when needed: the client independently asks the user to approve the exact URL after you request it, so do not ask for or wait for approval yourself.",
         {
             "type": "object",
             "required": ["url"],
