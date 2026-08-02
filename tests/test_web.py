@@ -1,6 +1,7 @@
 import unittest
 
 from agentx.tools import ToolResult, ToolSpec
+from agentx.browser import BrowserToolExecutor
 from agentx.web import WebAccessError, WebAccessService, WebUIAdapter
 
 
@@ -46,6 +47,14 @@ class WebAccessServiceTests(unittest.TestCase):
         self.assertEqual("web_fetch", result.name)
         self.assertEqual({"name": "web_fetch", "ok": True}, adapter.event(result))
         self.assertNotIn("private page text", adapter.event(result))
+
+    def test_ui_adapter_combines_web_and_browser_tools(self):
+        tools = _FakeWebTools(ToolResult(name="web_search", ok=True, output={"results": []}))
+        browser = BrowserToolExecutor(artifacts_dir=".", controller=object(), approval_callback=lambda operation, details: True)
+        adapter = WebUIAdapter(WebAccessService(research_tools=tools), browser=browser)
+
+        self.assertIn("web_search", {spec.name for spec in adapter.specs})
+        self.assertIn("browser_open", {spec.name for spec in adapter.specs})
 
 
 if __name__ == "__main__":
