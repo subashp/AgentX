@@ -766,6 +766,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual("", stderr.getvalue())
         self.assertEqual("patch README", plan.call_args.args[0])
         self.assertTrue(plan.call_args.kwargs["enable_patch_tool"])
+        self.assertTrue(plan.call_args.kwargs["enable_shell_tool"])
 
     def test_interactive_web_approval_shows_request_and_requires_yes(self):
         class FlushTrackingStringIO(io.StringIO):

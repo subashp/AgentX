@@ -514,6 +514,7 @@ def _interactive(
                     web_approval=web_approval,
                     request_cancellation=request_cancellation,
                     enable_patch_tool=True,
+                    enable_shell_tool=True,
                 )
             except KeyboardInterrupt:
                 stdout.write("\nRequest cancelled. Returning to AgentX.\n")

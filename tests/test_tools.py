@@ -355,6 +355,23 @@ class ControlledWorkspaceToolsTests(unittest.TestCase):
         self.assertEqual("shell.exec", calls[0][0])
         run.assert_not_called()
 
+    def test_controlled_tools_can_expose_shell_without_patch(self):
+        approve, _calls = self._approval(True)
+        tools = ControlledWorkspaceTools(
+            self.root,
+            allowed_paths=("src/main.py",),
+            approval_callback=approve,
+            enable_patch=False,
+            enable_shell=True,
+        )
+
+        names = {spec.name for spec in tools.specs}
+        self.assertNotIn("workspace_patch", names)
+        self.assertIn("shell_exec", names)
+        result = tools.call("workspace_patch", {"patch": self._patch()})
+        self.assertFalse(result.ok)
+        self.assertIn("disabled", result.error)
+
     def test_shell_exec_uses_argv_without_shell(self):
         approve, calls = self._approval(True)
         tools = ControlledWorkspaceTools(self.root, allowed_paths=("src/main.py",), approval_callback=approve)
