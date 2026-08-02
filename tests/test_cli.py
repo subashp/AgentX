@@ -252,6 +252,91 @@ class CliTests(unittest.TestCase):
         self.assertEqual("", stderr.getvalue())
         self.assertIn("settings", json.loads(stdout.getvalue()))
 
+    def test_memory_commands_round_trip_agentmemory_database(self):
+        root = Path("tests") / ".tmp_cli_memory"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            )
+        )
+        try:
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                code = cli.run(
+                    ["--json", "memory", "remember", "--class", "private", "use", "local", "Qwen"],
+                    stdout,
+                    stderr,
+                )
+                self.assertEqual(0, code)
+                self.assertEqual("", stderr.getvalue())
+                remembered = json.loads(stdout.getvalue())
+                self.assertEqual("private", remembered["privacy_class"])
+
+                stdout = io.StringIO()
+                code = cli.run(["--json", "memory", "search", "Qwen"], stdout, stderr)
+                self.assertEqual(0, code)
+                search = json.loads(stdout.getvalue())
+                self.assertEqual([remembered["memory_id"]], [item["memory_id"] for item in search["memories"]])
+
+                stdout = io.StringIO()
+                code = cli.run(
+                    [
+                        "--json",
+                        "memory",
+                        "correct",
+                        remembered["memory_id"],
+                        "use",
+                        "private",
+                        "Qwen",
+                    ],
+                    stdout,
+                    stderr,
+                )
+                self.assertEqual(0, code)
+                corrected = json.loads(stdout.getvalue())
+                self.assertEqual([remembered["memory_id"]], corrected["supersedes"])
+
+                stdout = io.StringIO()
+                code = cli.run(["memory", "forget", corrected["memory_id"]], stdout, stderr)
+                self.assertEqual(0, code)
+                self.assertIn("deleted: True", stdout.getvalue())
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
+    def test_memory_forget_requires_id_or_all(self):
+        root = Path("tests") / ".tmp_cli_memory_missing_id"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            )
+        )
+        try:
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                code = cli.run(["memory", "forget"], stdout, stderr)
+            self.assertEqual(2, code)
+            self.assertIn("requires <memory-id> or --all", stderr.getvalue())
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
     def test_prompt_shorthand_returns_route_decision(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

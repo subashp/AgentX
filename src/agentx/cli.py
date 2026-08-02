@@ -4,6 +4,7 @@ import argparse
 import contextlib
 import json
 import os
+import shlex
 import sys
 import threading
 import uuid
@@ -28,6 +29,13 @@ from .adapters import (
     execute_fake_run,
 )
 from .config import ConfigError, ProviderSettings, Settings, load_settings
+from .memory import (
+    AgentXMemoryError,
+    append_interaction_events,
+    apply_memory_proposal,
+    call_memory_tool,
+    list_memory_proposals,
+)
 from .openai_compatible import OpenAICompatibleAdapter, RequestCancellation
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
 from .subagents import SubagentManager, SubagentTask, SubagentTools
@@ -135,6 +143,28 @@ def build_parser() -> argparse.ArgumentParser:
     config_sub = config.add_subparsers(dest="config_command")
     config_sub.add_parser("show", help="show resolved settings")
     config_sub.add_parser("path", help="show resolved AgentX state paths")
+
+    memory = subparsers.add_parser("memory", help="inspect and manage AgentX memory")
+    memory_sub = memory.add_subparsers(dest="memory_command")
+    memory_remember = memory_sub.add_parser("remember", help="store an explicit memory")
+    memory_remember.add_argument("--class", dest="privacy_class", choices=("generic", "team", "private"), required=True)
+    memory_remember.add_argument("content", nargs="+")
+    memory_search = memory_sub.add_parser("search", help="search memory")
+    memory_search.add_argument("query", nargs="?", default="")
+    memory_search.add_argument("--class", dest="privacy_class", choices=("generic", "team", "private"), default=None)
+    memory_show = memory_sub.add_parser("show", help="show one memory")
+    memory_show.add_argument("memory_id")
+    memory_correct = memory_sub.add_parser("correct", help="correct one memory")
+    memory_correct.add_argument("memory_id")
+    memory_correct.add_argument("replacement", nargs="+")
+    memory_forget = memory_sub.add_parser("forget", help="delete memory")
+    memory_forget.add_argument("memory_id", nargs="?")
+    memory_forget.add_argument("--all", action="store_true")
+    memory_forget.add_argument("--soft", action="store_true")
+    memory_proposals = memory_sub.add_parser("proposals", help="list memory proposals")
+    memory_proposals.add_argument("--status", default=None)
+    memory_apply = memory_sub.add_parser("apply", help="apply one memory proposal")
+    memory_apply.add_argument("proposal_id")
 
     parser.add_argument(
         "prompt_shorthand",
@@ -316,6 +346,9 @@ def run(
     if args.command == "config" and args.config_command == "path":
         return _write(settings.paths.as_dict(), args.json, stdout)
 
+    if args.command == "memory":
+        return _memory_command(args, settings, args.json, stdout, stderr)
+
     parser.print_help(stdout)
     return 0
 
@@ -337,6 +370,7 @@ def _prompt_shorthand(argv: Sequence[str]) -> tuple[bool, str] | None:
         "plan",
         "execute",
         "config",
+        "memory",
         "-h",
         "--help",
     }:
@@ -1074,6 +1108,63 @@ def _execute(
     )
 
 
+def _memory_command(args, settings, json_output: bool, stdout: TextIO, stderr: TextIO) -> int:
+    if args.memory_command is None:
+        stderr.write("agentx: memory requires a subcommand.\n")
+        return 2
+    try:
+        if args.memory_command == "remember":
+            payload = call_memory_tool(
+                settings.paths,
+                "memory_remember",
+                {
+                    "content": " ".join(args.content),
+                    "privacy_class": args.privacy_class,
+                },
+            )
+            return _write(payload, json_output, stdout, text_formatter=_format_memory_record)
+        if args.memory_command == "search":
+            request = {"query": args.query}
+            if args.privacy_class:
+                request["privacy_class"] = args.privacy_class
+            payload = call_memory_tool(settings.paths, "memory_search", request)
+            return _write(payload, json_output, stdout, text_formatter=_format_memory_search)
+        if args.memory_command == "show":
+            payload = call_memory_tool(settings.paths, "memory_show", {"memory_id": args.memory_id})
+            return _write(payload, json_output, stdout, text_formatter=_format_memory_record)
+        if args.memory_command == "correct":
+            payload = call_memory_tool(
+                settings.paths,
+                "memory_correct",
+                {"memory_id": args.memory_id, "replacement": " ".join(args.replacement)},
+            )
+            return _write(payload, json_output, stdout, text_formatter=_format_memory_record)
+        if args.memory_command == "forget":
+            if args.all:
+                payload = call_memory_tool(settings.paths, "memory_forget", {"all": True, "hard": not args.soft})
+            elif args.memory_id:
+                payload = call_memory_tool(
+                    settings.paths,
+                    "memory_forget",
+                    {"memory_id": args.memory_id, "hard": not args.soft},
+                )
+            else:
+                stderr.write("agentx: memory forget requires <memory-id> or --all.\n")
+                return 2
+            return _write(payload, json_output, stdout, text_formatter=_format_memory_delete)
+        if args.memory_command == "proposals":
+            payload = {"proposals": list_memory_proposals(settings.paths, status=args.status)}
+            return _write(payload, json_output, stdout, text_formatter=_format_memory_proposals)
+        if args.memory_command == "apply":
+            payload = apply_memory_proposal(settings.paths, args.proposal_id)
+            return _write(payload, json_output, stdout, text_formatter=_format_memory_record)
+    except AgentXMemoryError as exc:
+        stderr.write(f"agentx: {exc}\n")
+        return 2
+    stderr.write(f"agentx: unknown memory subcommand '{args.memory_command}'.\n")
+    return 2
+
+
 def _write(value, json_output: bool, stdout: TextIO, text_formatter=None) -> int:
     if json_output:
         stdout.write(json.dumps(value, indent=2, sort_keys=True))
@@ -1105,6 +1196,40 @@ def _format_init(payload: dict[str, object]) -> str:
 
 def _format_fake_run(payload: dict[str, object]) -> str:
     return f"wrote fake run artifacts to {payload['root']}\n"
+
+
+def _format_memory_record(payload: Mapping[str, object]) -> str:
+    memory_id = payload.get("memory_id", payload.get("id", "<unknown>"))
+    privacy = payload.get("privacy_class", payload.get("classification", "unknown"))
+    kind = payload.get("memory_kind", "memory")
+    text = payload.get("summary") or payload.get("content") or ""
+    return f"{memory_id}\t{privacy}\t{kind}\t{text}\n"
+
+
+def _format_memory_search(payload: Mapping[str, object]) -> str:
+    memories = payload.get("memories", ())
+    if not memories:
+        return "No memory records found.\n"
+    return "".join(_format_memory_record(memory) for memory in memories if isinstance(memory, Mapping))
+
+
+def _format_memory_delete(payload: Mapping[str, object]) -> str:
+    return f"deleted: {payload.get('deleted', False)}\n"
+
+
+def _format_memory_proposals(payload: Mapping[str, object]) -> str:
+    proposals = payload.get("proposals", ())
+    if not proposals:
+        return "No memory proposals found.\n"
+    lines = []
+    for proposal in proposals:
+        if not isinstance(proposal, Mapping):
+            continue
+        lines.append(
+            f"{proposal.get('proposal_id')}\t{proposal.get('status')}\t"
+            f"{proposal.get('operation')}\t{proposal.get('reason')}"
+        )
+    return "\n".join(lines) + "\n"
 
 
 def _format_plan(
