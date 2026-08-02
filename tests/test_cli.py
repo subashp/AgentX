@@ -1,6 +1,9 @@
 import io
 import json
+import os
 import shutil
+import threading
+import time
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -9,6 +12,11 @@ from agentx.adapters import AdapterResult
 from agentx import cli
 from agentx.config import AgentXPaths, ProviderSettings, Settings
 from agentx.providers import ProviderStatus
+
+if os.name == "posix":
+    import pty
+else:  # pragma: no cover - the terminal test is skipped outside POSIX.
+    pty = None
 
 
 class CliTests(unittest.TestCase):
@@ -553,6 +561,105 @@ class CliTests(unittest.TestCase):
         self.assertEqual("", stderr.getvalue())
         self.assertEqual(("README.md", "src/agentx"), plan.call_args.args[6])
         self.assertTrue(plan.call_args.kwargs["interactive_output"])
+        self.assertTrue(callable(plan.call_args.kwargs["web_approval"]))
+
+    def test_interactive_web_approval_shows_request_and_requires_yes(self):
+        class FlushTrackingStringIO(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.flush_calls = 0
+
+            def flush(self):
+                self.flush_calls += 1
+                super().flush()
+
+        stdout = FlushTrackingStringIO()
+        approval = cli._InteractiveWebApproval(io.StringIO("yes\n\n"), stdout)
+
+        allowed = approval(
+            "web.search",
+            {"query": "current Qwen release", "max_results": 3},
+        )
+        denied = approval(
+            "web.fetch",
+            {"url": "https://example.com/release", "max_chars": 4000},
+        )
+
+        self.assertTrue(allowed)
+        self.assertFalse(denied)
+        rendered = stdout.getvalue()
+        self.assertIn("Internet access requested", rendered)
+        self.assertIn("current Qwen release", rendered)
+        self.assertIn("https://example.com/release", rendered)
+        self.assertIn("Approved.", rendered)
+        self.assertIn("Denied.", rendered)
+        self.assertEqual(2, stdout.flush_calls)
+
+    def test_interactive_web_approval_treats_escape_as_cancelled(self):
+        stdout = io.StringIO()
+        approval = cli._InteractiveWebApproval(io.StringIO("\x1b"), stdout)
+
+        allowed = approval(
+            "web.search",
+            {"query": "current Qwen release", "max_results": 3},
+        )
+
+        self.assertFalse(allowed)
+        self.assertIn("Cancelled.", stdout.getvalue())
+
+    @unittest.skipUnless(os.name == "posix", "Escape monitoring uses POSIX terminal APIs")
+    def test_interactive_escape_cancels_an_active_request(self):
+        master_fd, slave_fd = pty.openpty()
+        stdin = os.fdopen(slave_fd, "r", encoding="utf-8", closefd=False)
+        stdout = io.StringIO()
+        cancelled_callbacks = []
+        cancellation = cli._InteractiveRequestCancellation(stdin, stdout)
+        try:
+            with cancellation.request(lambda: cancelled_callbacks.append(True)) as cancelled:
+                os.write(master_fd, b"\x1b")
+                deadline = time.monotonic() + 1
+                while not cancelled.is_set() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+
+                self.assertTrue(cancelled.is_set())
+        finally:
+            stdin.close()
+            os.close(master_fd)
+            os.close(slave_fd)
+
+        self.assertEqual([True], cancelled_callbacks)
+        self.assertIn("Request cancelled. Returning to AgentX.", stdout.getvalue())
+
+    @unittest.skipUnless(os.name == "posix", "Escape monitoring uses POSIX terminal APIs")
+    def test_interactive_web_approval_accepts_escape_without_enter(self):
+        master_fd, slave_fd = pty.openpty()
+        stdin = os.fdopen(slave_fd, "r", encoding="utf-8", closefd=False)
+        stdout = io.StringIO()
+        approval = cli._InteractiveWebApproval(stdin, stdout)
+        result = []
+
+        def ask_for_approval():
+            result.append(
+                approval("web.search", {"query": "AMD stock price", "max_results": 3})
+            )
+
+        worker = threading.Thread(target=ask_for_approval)
+        worker.start()
+        try:
+            deadline = time.monotonic() + 1
+            while "Allow this request?" not in stdout.getvalue() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            while worker.is_alive() and time.monotonic() < deadline:
+                os.write(master_fd, b"\x1b")
+                worker.join(timeout=0.05)
+        finally:
+            stdin.close()
+            os.close(master_fd)
+            os.close(slave_fd)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual([False], result)
+        self.assertIn("Cancelled.", stdout.getvalue())
 
     def test_plan_formatter_surfaces_provider_stdout_but_suppresses_success_stderr(self):
         rendered = cli._format_plan(
@@ -1225,6 +1332,7 @@ class RecordingPrivateAdapter:
         stream=False,
         stream_callback=None,
         tool_executor=None,
+        request_cancellation=None,
     ):
         self.base_url = base_url
         self.model = model
@@ -1235,6 +1343,7 @@ class RecordingPrivateAdapter:
         self.stream = stream
         self.stream_callback = stream_callback
         self.tool_executor = tool_executor
+        self.request_cancellation = request_cancellation
         self.instances.append(self)
 
     def execute(self, request):

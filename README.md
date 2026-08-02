@@ -107,9 +107,22 @@ Qwen/vLLM combinations that emit complete raw
 blocks, runs the approved read-only tool, and continues the same tool loop.
 Malformed or mixed prose/tool output is rejected rather than executed.
 
+Interactive private-model sessions can also research public information with
+`web_search` and `web_fetch`. AgentX displays the exact query or URL and asks
+for confirmation before every internet request. Search results are limited to
+five compact DuckDuckGo entries; if DuckDuckGo serves an automated-request
+challenge, AgentX asks again before using Brave Search as a fallback. Fetched
+pages are converted to plain text and limited to 6,000 characters so research
+does not crowd out the 32K model context. A named website or URL uses direct
+fetching; an unspecified source uses search. Fetches accept public HTTPS pages
+only and reject credentials, non-default ports, localhost, and private-network
+addresses. Non-interactive plans do not expose web tools, preventing unattended
+network access.
+
 Use `/providers`, `/provider`, `/context`, `/help`, and `/quit` in the
-interactive session. Run `agentx providers list` to see which optional local
-providers are available.
+interactive session. Press `Esc` to cancel an active private-model request or
+an internet-approval prompt and return to the CLI. Run `agentx providers list`
+to see which optional local providers are available.
 
 ### Use the API from another local program
 

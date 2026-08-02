@@ -12,6 +12,7 @@ from agentx.cli import _PrivateSubagentRunner
 from agentx.openai_compatible import (
     OpenAICompatibleAdapter,
     OpenAICompatibleChatClient,
+    OpenAICompatibleClientError,
 )
 from agentx.routing import AgentRun
 from agentx.store import RUN_ARTIFACT_FILES, SessionStore
@@ -73,6 +74,59 @@ class PrivateAdapterFixtureTestCase(unittest.TestCase):
 
 
 class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
+    def test_cancel_active_request_interrupts_a_blocking_read(self):
+        class BlockingResponse:
+            def __init__(self):
+                self.read_started = threading.Event()
+                self.released = threading.Event()
+                self.closed = False
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def read(self):
+                self.read_started.set()
+                self.released.wait(timeout=2)
+                if self.closed:
+                    raise OSError("response closed")
+                return b'{"choices":[{"message":{"role":"assistant","content":"late"}}]}'
+
+            def close(self):
+                self.closed = True
+                self.released.set()
+
+        response = BlockingResponse()
+        client = OpenAICompatibleChatClient(
+            base_url="http://127.0.0.1:8000",
+            model="local-coder",
+            opener=lambda request, timeout=None: response,
+        )
+        cancelled = threading.Event()
+        errors = []
+
+        def invoke():
+            try:
+                client.create_chat_completion(
+                    [{"role": "user", "content": "Wait"}],
+                    cancel_event=cancelled,
+                )
+            except OpenAICompatibleClientError as exc:
+                errors.append(exc)
+
+        worker = threading.Thread(target=invoke)
+        worker.start()
+        self.assertTrue(response.read_started.wait(timeout=1))
+        cancelled.set()
+        client.cancel_active_request()
+        worker.join(timeout=1)
+
+        self.assertFalse(worker.is_alive())
+        self.assertEqual(1, len(errors))
+        self.assertEqual("cancelled", errors[0].error_type)
+
     def test_success_posts_chat_completion_payload_and_parses_usage(self):
         adapter = OpenAICompatibleAdapter(
             base_url=self.base_url,
@@ -118,6 +172,7 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertEqual("local-coder", payload["model"])
         self.assertFalse(payload["stream"])
         self.assertEqual(["system", "user"], [message["role"] for message in payload["messages"]])
+        self.assertIn("use web_fetch for a user-named website", payload["messages"][0]["content"])
         user_content = payload["messages"][1]["content"]
         self.assertIn("Mode: plan", user_content)
         self.assertIn("Context paths:\n- src/agentx/openai_compatible.py", user_content)
@@ -458,6 +513,7 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
             provider_id="private-openai-compatible",
             source_root=context_root,
             session_store=SessionStore(self.make_paths()),
+            web_approval=lambda operation, details: True,
         )
 
         result = runner.run(
@@ -475,6 +531,7 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertTrue((artifact_root / "outcome.json").exists())
         payload = self.server.requests[0]["json"]
         self.assertNotIn("subagent_create", json.dumps(payload))
+        self.assertIn("web_search", json.dumps(payload))
         self.assertIn("child-visible context", payload["messages"][1]["content"])
 
     def test_context_contents_are_bounded_to_policy_included_paths(self):

@@ -3,10 +3,19 @@
 from __future__ import annotations
 
 import fnmatch
+import html
+import http.client
+import ipaddress
 import json
+import socket
+import ssl
 import subprocess
+import urllib.error
+import urllib.parse
+import urllib.request
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -103,6 +112,17 @@ _DENIED_FILE_NAMES = frozenset({"auth.json", "credentials.json", "secrets.json"}
 _MAX_OUTPUT_CHARS = 24_000
 _MAX_TREE_ENTRIES = 500
 _MAX_SEARCH_RESULTS = 200
+_MAX_WEB_QUERY_CHARS = 500
+_MAX_WEB_RESULTS = 5
+_MAX_WEB_RESULT_CHARS = 500
+_MAX_WEB_FETCH_CHARS = 6_000
+_MAX_WEB_RESPONSE_BYTES = 512_000
+_MAX_WEB_REDIRECTS = 3
+_WEB_TIMEOUT_SECONDS = 15
+_WEB_SEARCH_ENDPOINT = "https://html.duckduckgo.com/html/"
+_WEB_SEARCH_SOURCE = "DuckDuckGo Search"
+_WEB_SEARCH_FALLBACK_ENDPOINT = "https://search.brave.com/search"
+_WEB_SEARCH_FALLBACK_SOURCE = "Brave Search"
 
 
 READ_ONLY_TOOL_SPECS: tuple[ToolSpec, ...] = (
@@ -186,6 +206,34 @@ CONTROLLED_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "properties": {
                 "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+            },
+        },
+    ),
+)
+
+
+WEB_RESEARCH_TOOL_SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        "web_search",
+        "Search the public web for current information when the user did not name a website or URL. Uses DuckDuckGo and requires user approval for every request.",
+        {
+            "type": "object",
+            "required": ["query"],
+            "properties": {
+                "query": {"type": "string", "minLength": 1, "maxLength": _MAX_WEB_QUERY_CHARS},
+                "max_results": {"type": "integer", "minimum": 1, "maximum": _MAX_WEB_RESULTS},
+            },
+        },
+    ),
+    ToolSpec(
+        "web_fetch",
+        "Fetch a public HTTPS page as bounded plain text. Use this when the user names a specific website or URL. Requires user approval for every request.",
+        {
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+                "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+                "max_chars": {"type": "integer", "minimum": 500, "maximum": _MAX_WEB_FETCH_CHARS},
             },
         },
     ),
@@ -396,6 +444,522 @@ class ReadOnlyWorkspaceTools:
         return name in _DENIED_FILE_NAMES or any(fnmatch.fnmatch(name, pattern) for pattern in _DENIED_FILE_PATTERNS)
 
 
+class WebResearchTools:
+    """Approval-gated, bounded public-web research tools.
+
+    These tools are deliberately separate from workspace tools. They are only
+    advertised when an approval callback is supplied, so non-interactive runs
+    cannot accidentally send prompts or URLs to a third party.
+    """
+
+    def __init__(
+        self,
+        *,
+        approval_callback: ApprovalCallback | None = None,
+        opener: Callable[..., object] | None = None,
+        resolver: Callable[..., object] | None = None,
+    ) -> None:
+        if approval_callback is not None and not callable(approval_callback):
+            raise ToolError("approval_callback must be callable or None")
+        if opener is not None and not callable(opener):
+            raise ToolError("opener must be callable or None")
+        if resolver is not None and not callable(resolver):
+            raise ToolError("resolver must be callable or None")
+        self.approval_callback = approval_callback
+        self._opener = opener
+        self._resolver = resolver or socket.getaddrinfo
+
+    @property
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return WEB_RESEARCH_TOOL_SPECS if self.approval_callback is not None else ()
+
+    def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
+        args = dict(arguments or {})
+        name = {"web.search": "web_search", "web.fetch": "web_fetch"}.get(name, name)
+        try:
+            output = {
+                "web_search": self.search,
+                "web_fetch": self.fetch,
+            }[name](args)
+        except (KeyError, ToolError, OSError, UnicodeError, ValueError) as exc:
+            return ToolResult(name=name, ok=False, error=str(exc))
+        return ToolResult(name=name, ok=True, output=output)
+
+    def search(self, args: Mapping[str, object]) -> dict[str, object]:
+        query = args.get("query")
+        if not isinstance(query, str) or not query.strip():
+            raise ToolError("query must be a non-empty string")
+        query = query.strip()
+        if len(query) > _MAX_WEB_QUERY_CHARS:
+            raise ToolError(f"query must be at most {_MAX_WEB_QUERY_CHARS} characters")
+        max_results = _bounded_int(args.get("max_results", 5), "max_results", 1, _MAX_WEB_RESULTS)
+        if not self._approve(
+            "web.search",
+            {
+                "query": query,
+                "source": _WEB_SEARCH_SOURCE,
+                "max_results": max_results,
+            },
+        ):
+            raise ToolError("approval denied")
+
+        search_result, duckduckgo_challenge = self._search_with_provider(
+            endpoint=_WEB_SEARCH_ENDPOINT,
+            source=_WEB_SEARCH_SOURCE,
+            query=query,
+            max_results=max_results,
+        )
+        if duckduckgo_challenge:
+            if not self._approve(
+                "web.search",
+                {
+                    "query": query,
+                    "source": _WEB_SEARCH_FALLBACK_SOURCE,
+                    "max_results": max_results,
+                    "reason": "DuckDuckGo requested a bot challenge",
+                },
+            ):
+                raise ToolError("DuckDuckGo requested a bot challenge and Brave Search fallback was not approved")
+            search_result, _ = self._search_with_provider(
+                endpoint=_WEB_SEARCH_FALLBACK_ENDPOINT,
+                source=_WEB_SEARCH_FALLBACK_SOURCE,
+                query=query,
+                max_results=max_results,
+            )
+        return search_result
+
+    def _search_with_provider(
+        self,
+        *,
+        endpoint: str,
+        source: str,
+        query: str,
+        max_results: int,
+    ) -> tuple[dict[str, object], bool]:
+        url = endpoint + "?" + urllib.parse.urlencode({"q": query})
+        _, content_type, body, source_truncated = self._open_public_https(url)
+        if content_type and not _is_text_content_type(content_type):
+            raise ToolError("search service returned a non-text response")
+        source_text = _decode_web_text(body)
+        parser = _SearchResultParser()
+        parser.feed(source_text)
+        parser.close()
+
+        results = []
+        for result in parser.results[:max_results]:
+            title = _clip_text(result["title"], _MAX_WEB_RESULT_CHARS)
+            href = _unwrap_search_result_url(result["url"])
+            if not title or not href:
+                continue
+            item: dict[str, str] = {"title": title, "url": href}
+            snippet = _clip_text(result.get("snippet", ""), _MAX_WEB_RESULT_CHARS)
+            if snippet:
+                item["snippet"] = snippet
+            results.append(item)
+
+        return (
+            {
+                "query": query,
+                "results": results,
+                "source": source,
+                "truncated": source_truncated or len(parser.results) > max_results,
+            },
+            _is_duckduckgo_challenge(source_text) if source == _WEB_SEARCH_SOURCE else False,
+        )
+
+    def fetch(self, args: Mapping[str, object]) -> dict[str, object]:
+        url = _normalize_public_https_url(args.get("url"))
+        max_chars = _bounded_int(args.get("max_chars", 4_000), "max_chars", 500, _MAX_WEB_FETCH_CHARS)
+        if not self._approve(
+            "web.fetch",
+            {"url": url, "max_chars": max_chars},
+        ):
+            raise ToolError("approval denied")
+
+        final_url, content_type, body, source_truncated = self._open_public_https(url)
+        if content_type and not _is_text_content_type(content_type):
+            raise ToolError("web_fetch only accepts text or JSON responses")
+        source_text = _decode_web_text(body)
+        if content_type.startswith("text/html") or content_type.startswith("application/xhtml") or not content_type:
+            parser = _WebDocumentParser()
+            parser.feed(source_text)
+            parser.close()
+            title = _clip_text(parser.title, 300)
+            text = parser.text
+        else:
+            title = ""
+            text = source_text
+        text = _compact_text(text)
+        truncated = source_truncated or len(text) > max_chars
+        payload: dict[str, object] = {
+            "url": final_url,
+            "content": text[:max_chars],
+            "truncated": truncated,
+        }
+        if title:
+            payload["title"] = title
+        return payload
+
+    def _approve(self, operation: str, details: Mapping[str, object]) -> bool:
+        if self.approval_callback is None:
+            return False
+        try:
+            return self.approval_callback(operation, details) is True
+        except Exception:
+            return False
+
+    def _open_public_https(self, url: str) -> tuple[str, str, bytes, bool]:
+        current_url = url
+        for redirect_count in range(_MAX_WEB_REDIRECTS + 1):
+            hostname, addresses = _validate_public_https_url(current_url, resolver=self._resolver)
+            request = urllib.request.Request(
+                current_url,
+                headers={
+                    "Accept": "text/html, text/plain, application/json;q=0.9",
+                    "User-Agent": "AgentX-WebResearch/0.1",
+                },
+                method="GET",
+            )
+            try:
+                response = (
+                    self._opener(request, timeout=_WEB_TIMEOUT_SECONDS)
+                    if self._opener is not None
+                    else _open_pinned_https(request, hostname, addresses, timeout=_WEB_TIMEOUT_SECONDS)
+                )
+            except urllib.error.HTTPError as exc:
+                response = exc
+            except urllib.error.URLError as exc:
+                raise ToolError(f"web request failed: {_safe_web_error_reason(exc)}") from exc
+            except (socket.timeout, TimeoutError) as exc:
+                raise ToolError("web request timed out") from exc
+
+            status = _response_status(response)
+            if status in {301, 302, 303, 307, 308}:
+                location = _response_header(response, "Location")
+                _close_response(response)
+                if redirect_count >= _MAX_WEB_REDIRECTS:
+                    raise ToolError(f"web request exceeded {_MAX_WEB_REDIRECTS} redirects")
+                if not location:
+                    raise ToolError("web redirect did not include a location")
+                current_url = urllib.parse.urljoin(current_url, location)
+                continue
+            if not 200 <= status < 300:
+                _close_response(response)
+                raise ToolError(f"web request returned HTTP {status}")
+            try:
+                body, source_truncated = _read_web_response(response)
+                content_type = _response_header(response, "Content-Type").split(";", 1)[0].strip().lower()
+            finally:
+                _close_response(response)
+            return current_url, content_type, body, source_truncated
+        raise ToolError(f"web request exceeded {_MAX_WEB_REDIRECTS} redirects")
+
+
+class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+    """HTTPS connection pinned to a prevalidated address with hostname TLS."""
+
+    def __init__(self, hostname: str, address: str, *, timeout: float) -> None:
+        super().__init__(hostname, port=443, timeout=timeout, context=ssl.create_default_context())
+        self._address = address
+
+    def connect(self) -> None:
+        self.sock = socket.create_connection((self._address, self.port), self.timeout)
+        if self._tunnel_host:
+            self._tunnel()
+        self.sock = self._context.wrap_socket(self.sock, server_hostname=self.host)
+
+
+class _PinnedResponse:
+    def __init__(self, response: http.client.HTTPResponse, connection: _PinnedHTTPSConnection) -> None:
+        self._response = response
+        self._connection = connection
+        self.status = response.status
+        self.headers = response.headers
+
+    def read(self, amount: int = -1) -> bytes:
+        return self._response.read(amount)
+
+    def close(self) -> None:
+        try:
+            self._response.close()
+        finally:
+            self._connection.close()
+
+
+def _open_pinned_https(
+    request: urllib.request.Request,
+    hostname: str,
+    addresses: Sequence[str],
+    *,
+    timeout: float,
+) -> _PinnedResponse:
+    parsed = urllib.parse.urlsplit(request.full_url)
+    target = parsed.path or "/"
+    if parsed.query:
+        target += "?" + parsed.query
+    headers = dict(request.header_items())
+    last_error: OSError | None = None
+    for address in addresses:
+        connection = _PinnedHTTPSConnection(hostname, address, timeout=timeout)
+        try:
+            connection.request(request.get_method(), target, headers=headers)
+            return _PinnedResponse(connection.getresponse(), connection)
+        except OSError as exc:
+            last_error = exc
+            connection.close()
+    raise ToolError(f"could not connect to public hostname: {type(last_error).__name__}")
+
+
+def _normalize_public_https_url(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ToolError("url must be a non-empty public HTTPS URL")
+    url = value.strip()
+    if len(url) > 2048:
+        raise ToolError("url must be at most 2048 characters")
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() != "https" or not parsed.netloc:
+        raise ToolError("url must use public HTTPS")
+    if parsed.username is not None or parsed.password is not None:
+        raise ToolError("url must not include credentials")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ToolError("url has an invalid port") from exc
+    if port not in {None, 443}:
+        raise ToolError("url must use the default HTTPS port")
+    if not parsed.hostname:
+        raise ToolError("url must include a hostname")
+    return urllib.parse.urlunsplit(("https", parsed.netloc, parsed.path or "/", parsed.query, ""))
+
+
+def _validate_public_https_url(
+    url: str,
+    *,
+    resolver: Callable[..., object],
+) -> tuple[str, tuple[str, ...]]:
+    normalized = _normalize_public_https_url(url)
+    hostname = urllib.parse.urlsplit(normalized).hostname
+    if not hostname:
+        raise ToolError("url must include a hostname")
+    hostname = hostname.rstrip(".")
+    if hostname.lower() == "localhost" or hostname.lower().endswith(".localhost"):
+        raise ToolError("localhost URLs are not allowed")
+    try:
+        literal_ip = ipaddress.ip_address(hostname)
+    except ValueError:
+        literal_ip = None
+    if literal_ip is not None:
+        if not literal_ip.is_global:
+            raise ToolError("non-public IP addresses are not allowed")
+        return hostname, (str(literal_ip),)
+    try:
+        addresses = resolver(hostname, 443, type=socket.SOCK_STREAM)
+    except (OSError, socket.gaierror) as exc:
+        raise ToolError("could not resolve public hostname") from exc
+    resolved_ips = {entry[4][0].split("%", 1)[0] for entry in addresses if len(entry) >= 5 and entry[4]}
+    if not resolved_ips:
+        raise ToolError("could not resolve public hostname")
+    for address in resolved_ips:
+        try:
+            ip = ipaddress.ip_address(address)
+        except ValueError as exc:
+            raise ToolError("hostname resolved to an invalid address") from exc
+        if not ip.is_global:
+            raise ToolError("hostname resolves to a non-public IP address")
+    return hostname, tuple(sorted(resolved_ips))
+
+
+def _response_status(response: object) -> int:
+    status = getattr(response, "status", None)
+    if not isinstance(status, int):
+        getcode = getattr(response, "getcode", None)
+        status = getcode() if callable(getcode) else None
+    if not isinstance(status, int):
+        raise ToolError("web response did not include an HTTP status")
+    return status
+
+
+def _response_header(response: object, name: str) -> str:
+    headers = getattr(response, "headers", None)
+    getter = getattr(headers, "get", None)
+    value = getter(name) if callable(getter) else None
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _read_web_response(response: object) -> tuple[bytes, bool]:
+    reader = getattr(response, "read", None)
+    if not callable(reader):
+        raise ToolError("web response is not readable")
+    body = reader(_MAX_WEB_RESPONSE_BYTES + 1)
+    if not isinstance(body, bytes):
+        raise ToolError("web response body is not bytes")
+    return body[:_MAX_WEB_RESPONSE_BYTES], len(body) > _MAX_WEB_RESPONSE_BYTES
+
+
+def _close_response(response: object) -> None:
+    closer = getattr(response, "close", None)
+    if callable(closer):
+        closer()
+
+
+def _safe_web_error_reason(exc: urllib.error.URLError) -> str:
+    reason = exc.reason
+    if isinstance(reason, str):
+        return reason[:300]
+    return type(reason).__name__
+
+
+def _is_text_content_type(content_type: str) -> bool:
+    return content_type.startswith("text/") or content_type in {
+        "application/json",
+        "application/xhtml+xml",
+    }
+
+
+def _decode_web_text(body: bytes) -> str:
+    return body.decode("utf-8", errors="replace")
+
+
+def _compact_text(value: str) -> str:
+    return " ".join(html.unescape(value).split())
+
+
+def _clip_text(value: str, maximum: int) -> str:
+    compact = _compact_text(value)
+    return compact[:maximum].rstrip()
+
+
+def _unwrap_search_result_url(value: str) -> str:
+    href = html.unescape(value).strip()
+    if href.startswith("//"):
+        href = "https:" + href
+    parsed = urllib.parse.urlsplit(href)
+    if parsed.hostname and parsed.hostname.lower().endswith("duckduckgo.com") and parsed.path.startswith("/l/"):
+        redirected = urllib.parse.parse_qs(parsed.query).get("uddg", [])
+        if redirected and isinstance(redirected[0], str):
+            return redirected[0]
+    return href
+
+
+def _is_duckduckgo_challenge(value: str) -> bool:
+    lowered = value.casefold()
+    return "anomaly-modal" in lowered or "bots use duckduckgo" in lowered
+
+
+class _SearchResultParser(HTMLParser):
+    _VOID_TAGS = frozenset(
+        {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
+    )
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.results: list[dict[str, str]] = []
+        self._anchor: dict[str, str] | None = None
+        self._capture_snippet = False
+        self._snippet_parts: list[str] = []
+        self._depth = 0
+        self._brave_record: dict[str, str] | None = None
+        self._brave_block_depth: int | None = None
+        self._brave_capture: str | None = None
+        self._brave_capture_depth: int | None = None
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        attributes = dict(attrs)
+        classes = set((attributes.get("class") or "").split())
+        if (
+            tag == "div"
+            and self._brave_record is None
+            and "snippet" in classes
+            and attributes.get("data-type") == "web"
+        ):
+            self._brave_record = {"url": "", "title": "", "snippet": ""}
+            self._brave_block_depth = self._depth
+        if self._brave_record is not None:
+            if tag == "a" and not self._brave_record["url"] and attributes.get("href"):
+                self._brave_record["url"] = attributes["href"] or ""
+            if "search-snippet-title" in classes:
+                self._brave_capture = "title"
+                self._brave_capture_depth = self._depth
+            elif "generic-snippet" in classes:
+                self._brave_capture = "snippet"
+                self._brave_capture_depth = self._depth
+        if tag == "a" and "result__a" in classes:
+            self._anchor = {"url": attributes.get("href") or "", "title": ""}
+        elif "result__snippet" in classes and self.results:
+            self._capture_snippet = True
+            self._snippet_parts = []
+        if tag not in self._VOID_TAGS:
+            self._depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag == "a" and self._anchor is not None:
+            self.results.append(self._anchor)
+            self._anchor = None
+        elif self._capture_snippet and tag in {"a", "div", "span"}:
+            self._capture_snippet = False
+            if self.results:
+                self.results[-1]["snippet"] = " ".join(self._snippet_parts)
+        if self._brave_capture is not None and self._brave_capture_depth is not None:
+            if self._depth == self._brave_capture_depth + 1:
+                self._brave_capture = None
+                self._brave_capture_depth = None
+        if tag not in self._VOID_TAGS:
+            self._depth = max(0, self._depth - 1)
+        if self._brave_record is not None and self._brave_block_depth == self._depth:
+            if self._brave_record["title"] and self._brave_record["url"]:
+                self.results.append(self._brave_record)
+            self._brave_record = None
+            self._brave_block_depth = None
+
+    def handle_data(self, data: str) -> None:
+        if self._brave_record is not None and self._brave_capture is not None:
+            self._brave_record[self._brave_capture] += data
+        elif self._anchor is not None:
+            self._anchor["title"] += data
+        elif self._capture_snippet:
+            self._snippet_parts.append(data)
+
+
+class _WebDocumentParser(HTMLParser):
+    _SUPPRESSED_TAGS = frozenset({"script", "style", "noscript", "svg", "template"})
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._suppressed_depth = 0
+        self._in_title = False
+        self._title_parts: list[str] = []
+        self._parts: list[str] = []
+
+    @property
+    def title(self) -> str:
+        return " ".join(self._title_parts)
+
+    @property
+    def text(self) -> str:
+        return " ".join(self._parts)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        if tag in self._SUPPRESSED_TAGS:
+            self._suppressed_depth += 1
+        elif tag == "title" and not self._suppressed_depth:
+            self._in_title = True
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in self._SUPPRESSED_TAGS and self._suppressed_depth:
+            self._suppressed_depth -= 1
+        elif tag == "title":
+            self._in_title = False
+
+    def handle_data(self, data: str) -> None:
+        if self._suppressed_depth:
+            return
+        if self._in_title:
+            self._title_parts.append(data)
+        else:
+            self._parts.append(data)
+
+
 class ControlledWorkspaceTools(ReadOnlyWorkspaceTools):
     """Read-only tools plus explicitly approval-gated workspace mutations."""
 
@@ -581,4 +1145,6 @@ __all__ = [
     "ToolExecutor",
     "ToolResult",
     "ToolSpec",
+    "WEB_RESEARCH_TOOL_SPECS",
+    "WebResearchTools",
 ]

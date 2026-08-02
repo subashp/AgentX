@@ -1,12 +1,23 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
 import json
 import os
 import sys
+import threading
 import uuid
 from pathlib import Path
-from typing import Sequence, TextIO
+from typing import Callable, Iterator, Mapping, Sequence, TextIO
+
+try:
+    import select
+    import termios
+    import tty
+except ImportError:  # pragma: no cover - only used for interactive POSIX terminals.
+    select = None
+    termios = None
+    tty = None
 
 from .adapters import (
     AdapterError,
@@ -17,10 +28,16 @@ from .adapters import (
     execute_fake_run,
 )
 from .config import ConfigError, ProviderSettings, Settings, load_settings
-from .openai_compatible import OpenAICompatibleAdapter
+from .openai_compatible import OpenAICompatibleAdapter, RequestCancellation
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
 from .subagents import SubagentManager, SubagentTask, SubagentTools
-from .tools import CompositeToolExecutor, ReadOnlyWorkspaceTools, ToolError
+from .tools import (
+    ApprovalCallback,
+    CompositeToolExecutor,
+    ReadOnlyWorkspaceTools,
+    ToolError,
+    WebResearchTools,
+)
 from .workspace import WorkspaceError, normalize_scoped_path
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
@@ -382,6 +399,8 @@ def _interactive(
             return 2
 
     context_paths: tuple[str, ...] = ()
+    web_approval = _InteractiveWebApproval(stdin, stdout)
+    request_cancellation = _InteractiveRequestCancellation(stdin, stdout)
 
     while True:
         stdout.write(f"\nagentx[{selected_provider}]> ")
@@ -398,7 +417,7 @@ def _interactive(
         if command in {"/help", "help"}:
             stdout.write(
                 "Commands: /provider [id|auto], /providers, /context [clear|path...], /help, /quit. "
-                "Any other input is treated as a coding task.\n"
+                "Any other input is treated as a coding task; press Esc while a private-model request is active to cancel it.\n"
             )
             continue
         if command == "/providers":
@@ -456,20 +475,25 @@ def _interactive(
         if selected_provider == "auto":
             task_provider = _select_auto_interactive_provider(settings, statuses)
         if task_provider in {"codex", "claude", "kiro", "private-openai-compatible"}:
-            _plan(
-                prompt,
-                task_provider,
-                None,
-                session_id,
-                ".",
-                None,
-                context_paths,
-                settings,
-                False,
-                stdout,
-                stderr,
-                interactive_output=True,
-            )
+            try:
+                _plan(
+                    prompt,
+                    task_provider,
+                    None,
+                    session_id,
+                    ".",
+                    None,
+                    context_paths,
+                    settings,
+                    False,
+                    stdout,
+                    stderr,
+                    interactive_output=True,
+                    web_approval=web_approval,
+                    request_cancellation=request_cancellation,
+                )
+            except KeyboardInterrupt:
+                stdout.write("\nRequest cancelled. Returning to AgentX.\n")
         elif selected_provider == "fake-local":
             _plan(
                 prompt,
@@ -484,6 +508,7 @@ def _interactive(
                 stdout,
                 stderr,
                 interactive_output=True,
+                web_approval=web_approval,
             )
         else:
             if selected_provider != "auto":
@@ -712,6 +737,8 @@ def _plan(
     stderr: TextIO,
     *,
     interactive_output: bool = False,
+    web_approval: ApprovalCallback | None = None,
+    request_cancellation: RequestCancellation | None = None,
 ) -> int:
     try:
         if provider == "fake-local":
@@ -825,8 +852,14 @@ def _plan(
                     provider_id=provider,
                     source_root=scoped_source_root,
                     session_store=SessionStore(settings.paths),
+                    web_approval=web_approval,
+                    request_cancellation=request_cancellation,
                 ),
             )
+            tool_executors = [read_only_tools]
+            if web_approval is not None:
+                tool_executors.append(WebResearchTools(approval_callback=web_approval))
+            tool_executors.append(SubagentTools(subagent_manager))
             adapter = OpenAICompatibleAdapter(
                 base_url=endpoint,
                 model=provider_settings.model,
@@ -845,10 +878,8 @@ def _plan(
                     if not json_output
                     else None
                 ),
-                tool_executor=CompositeToolExecutor(
-                    read_only_tools,
-                    SubagentTools(subagent_manager),
-                ),
+                tool_executor=CompositeToolExecutor(*tool_executors),
+                request_cancellation=request_cancellation,
             )
 
         run = AgentRun(
@@ -906,6 +937,8 @@ class _PrivateSubagentRunner:
         provider_id: str,
         source_root: Path,
         session_store: SessionStore,
+        web_approval: ApprovalCallback | None = None,
+        request_cancellation: RequestCancellation | None = None,
     ) -> None:
         self.base_url = base_url
         self.model = model
@@ -914,6 +947,8 @@ class _PrivateSubagentRunner:
         self.provider_id = provider_id
         self.source_root = source_root
         self.session_store = session_store
+        self.web_approval = web_approval
+        self.request_cancellation = request_cancellation
 
     def run(
         self,
@@ -941,6 +976,9 @@ class _PrivateSubagentRunner:
             self.source_root,
             allowed_paths=task.context_paths,
         )
+        child_tool_executors = [child_tools]
+        if self.web_approval is not None:
+            child_tool_executors.append(WebResearchTools(approval_callback=self.web_approval))
         child_adapter = OpenAICompatibleAdapter(
             base_url=self.base_url,
             model=self.model,
@@ -949,7 +987,8 @@ class _PrivateSubagentRunner:
             provider_id=self.provider_id,
             context_root=self.source_root,
             stream=False,
-            tool_executor=child_tools,
+            tool_executor=CompositeToolExecutor(*child_tool_executors),
+            request_cancellation=self.request_cancellation,
         )
         stored = execute_adapter_run(
             session_store=self.session_store,
@@ -1117,6 +1156,172 @@ def _supports_color(stream: TextIO) -> bool:
         return False
     isatty = getattr(stream, "isatty", None)
     return bool(callable(isatty) and isatty())
+
+
+def _supports_terminal_key_input(stream: TextIO) -> bool:
+    if select is None or termios is None or tty is None:
+        return False
+    isatty = getattr(stream, "isatty", None)
+    if not callable(isatty) or not isatty():
+        return False
+    try:
+        stream.fileno()
+    except (AttributeError, OSError):
+        return False
+    return True
+
+
+def _read_terminal_line_or_escape(stdin: TextIO, stdout: TextIO) -> str:
+    """Read a short terminal answer, letting Escape take effect immediately."""
+
+    if not _supports_terminal_key_input(stdin):
+        return stdin.readline()
+    try:
+        fd = stdin.fileno()
+        attributes = termios.tcgetattr(fd)
+    except (AttributeError, OSError, termios.error):
+        return stdin.readline()
+
+    try:
+        tty.setcbreak(fd)
+        no_echo_attributes = termios.tcgetattr(fd)
+        no_echo_attributes[3] &= ~termios.ECHO
+        termios.tcsetattr(fd, termios.TCSADRAIN, no_echo_attributes)
+        characters: list[str] = []
+        while True:
+            key = os.read(fd, 1)
+            if key == b"\x1b":
+                stdout.write("\n")
+                stdout.flush()
+                return "\x1b"
+            if not key:
+                return ""
+            if key in {b"\r", b"\n"}:
+                stdout.write("\n")
+                stdout.flush()
+                return "".join(characters)
+            if key in {b"\x08", b"\x7f"}:
+                if characters:
+                    characters.pop()
+                    stdout.write("\b \b")
+                    stdout.flush()
+                continue
+            character = key.decode("utf-8", errors="ignore")
+            if character:
+                characters.append(character)
+                stdout.write(character)
+                stdout.flush()
+    finally:
+        try:
+            termios.tcsetattr(fd, termios.TCSADRAIN, attributes)
+        except (OSError, termios.error, UnboundLocalError):
+            pass
+
+
+class _InteractiveRequestCancellation:
+    """Watch a POSIX terminal for Escape while a provider request is active."""
+
+    def __init__(self, stdin: TextIO, stdout: TextIO) -> None:
+        self.stdin = stdin
+        self.stdout = stdout
+
+    @contextlib.contextmanager
+    def request(self, cancel_request: Callable[[], None]) -> Iterator[threading.Event]:
+        cancelled = threading.Event()
+        if not self._supports_escape_monitoring():
+            yield cancelled
+            return
+
+        completed = threading.Event()
+        ready = threading.Event()
+        watcher = threading.Thread(
+            target=self._watch_for_escape,
+            args=(cancelled, completed, ready, cancel_request),
+            daemon=True,
+            name="agentx-escape-cancel",
+        )
+        watcher.start()
+        ready.wait(timeout=0.25)
+        if ready.is_set():
+            self.stdout.write("\nPress Esc to cancel the active request.\n")
+            self.stdout.flush()
+        try:
+            yield cancelled
+        finally:
+            completed.set()
+            watcher.join(timeout=0.25)
+
+    def _supports_escape_monitoring(self) -> bool:
+        return _supports_terminal_key_input(self.stdin)
+
+    def _watch_for_escape(
+        self,
+        cancelled: threading.Event,
+        completed: threading.Event,
+        ready: threading.Event,
+        cancel_request: Callable[[], None],
+    ) -> None:
+        try:
+            fd = self.stdin.fileno()
+            attributes = termios.tcgetattr(fd)
+        except (AttributeError, OSError, termios.error):
+            ready.set()
+            return
+
+        try:
+            tty.setcbreak(fd)
+            ready.set()
+            while not completed.is_set():
+                readable, _, _ = select.select([fd], [], [], 0.1)
+                if not readable:
+                    continue
+                key = os.read(fd, 1)
+                if key != b"\x1b":
+                    continue
+                cancelled.set()
+                cancel_request()
+                self.stdout.write("\r\nRequest cancelled. Returning to AgentX.\n")
+                self.stdout.flush()
+                return
+        except (OSError, termios.error):
+            ready.set()
+        finally:
+            try:
+                termios.tcsetattr(fd, termios.TCSADRAIN, attributes)
+            except (OSError, termios.error, UnboundLocalError):
+                pass
+
+
+class _InteractiveWebApproval:
+    """Ask before a model sends a query or URL to a public web service."""
+
+    def __init__(self, stdin: TextIO, stdout: TextIO) -> None:
+        self.stdin = stdin
+        self.stdout = stdout
+
+    def __call__(self, operation: str, details: Mapping[str, object]) -> bool:
+        self.stdout.write("\nInternet access requested by the model.\n")
+        if operation == "web.search":
+            self.stdout.write(f"Search provider: {details.get('source', 'web search')}\n")
+            reason = details.get("reason")
+            if isinstance(reason, str) and reason:
+                self.stdout.write(f"Reason: {reason}\n")
+            self.stdout.write(f"Query: {details.get('query', '')}\n")
+            self.stdout.write(f"Maximum results: {details.get('max_results', '')}\n")
+        elif operation == "web.fetch":
+            self.stdout.write(f"Fetch URL: {details.get('url', '')}\n")
+            self.stdout.write(f"Maximum returned text: {details.get('max_chars', '')} characters\n")
+        else:
+            self.stdout.write(f"Operation: {operation}\n")
+        self.stdout.write("Allow this request? [y/N]: ")
+        self.stdout.flush()
+        answer = _read_terminal_line_or_escape(self.stdin, self.stdout).strip().lower()
+        if answer == "\x1b":
+            self.stdout.write("Cancelled.\n")
+            return False
+        allowed = answer in {"y", "yes"}
+        self.stdout.write("Approved.\n" if allowed else "Denied.\n")
+        return allowed
 
 
 class _CliStreamRenderer:

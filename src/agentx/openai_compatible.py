@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+import http.client
 import json
 import re
 import socket
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from contextlib import nullcontext
+from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, ContextManager, Iterator, Protocol
 
 from .adapters import (
     AdapterError,
@@ -39,7 +42,29 @@ class OpenAICompatibleClientError(RuntimeError):
         self.status_code = status_code
 
 
+def _raise_if_cancelled(
+    cancel_event: threading.Event | None,
+    *,
+    cause: BaseException | None = None,
+) -> None:
+    if cancel_event is None or not cancel_event.is_set():
+        return
+    error = OpenAICompatibleClientError("cancelled", "Request cancelled by user.")
+    if cause is not None:
+        raise error from cause
+    raise error
+
+
 UrlOpen = Callable[..., Any]
+
+
+class RequestCancellation(Protocol):
+    """Coordinates cancellation of one interactive provider request."""
+
+    def request(
+        self,
+        cancel_request: Callable[[], None],
+    ) -> ContextManager[threading.Event]: ...
 
 
 @dataclass(frozen=True)
@@ -51,6 +76,13 @@ class OpenAICompatibleChatClient:
     api_key: str | None = None
     timeout: float = 60.0
     opener: UrlOpen = urllib.request.urlopen
+    _active_response: Any | None = field(default=None, init=False, repr=False, compare=False)
+    _active_response_lock: threading.Lock = field(
+        default_factory=threading.Lock,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "base_url", _normalize_base_url(self.base_url))
@@ -99,7 +131,9 @@ class OpenAICompatibleChatClient:
         model: str | None = None,
         tools: Sequence[Mapping[str, object]] | None = None,
         tool_choice: str | Mapping[str, object] | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Mapping[str, object]:
+        _raise_if_cancelled(cancel_event)
         payload = self.build_payload(
             messages,
             model=model,
@@ -127,35 +161,45 @@ class OpenAICompatibleChatClient:
         )
         try:
             with self.opener(request, timeout=self.timeout) as response:
-                raw_body = response.read()
+                self._set_active_response(response)
+                try:
+                    raw_body = response.read()
+                finally:
+                    self._clear_active_response(response)
         except urllib.error.HTTPError as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             raise OpenAICompatibleClientError(
                 "http_error",
                 _http_error_message(exc),
                 status_code=exc.code,
             ) from exc
         except TimeoutError as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             raise OpenAICompatibleClientError(
                 "timeout",
                 f"OpenAI-compatible endpoint timed out after {self.timeout} seconds.",
             ) from exc
         except socket.timeout as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             raise OpenAICompatibleClientError(
                 "timeout",
                 f"OpenAI-compatible endpoint timed out after {self.timeout} seconds.",
             ) from exc
         except urllib.error.URLError as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             reason = _safe_url_error_reason(exc)
             raise OpenAICompatibleClientError(
                 "url_error",
                 f"OpenAI-compatible endpoint request failed: {reason}.",
             ) from exc
-        except OSError as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             raise OpenAICompatibleClientError(
                 "connection_error",
                 f"OpenAI-compatible endpoint request failed: {type(exc).__name__}.",
             ) from exc
 
+        _raise_if_cancelled(cancel_event)
         try:
             decoded = raw_body.decode("utf-8")
         except UnicodeDecodeError as exc:
@@ -183,7 +227,9 @@ class OpenAICompatibleChatClient:
         messages: Sequence[Mapping[str, object]],
         *,
         model: str | None = None,
+        cancel_event: threading.Event | None = None,
     ) -> Iterator[Mapping[str, object]]:
+        _raise_if_cancelled(cancel_event)
         payload = self.build_payload(messages, model=model, stream=True)
         body = json.dumps(payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
         headers = {
@@ -204,14 +250,22 @@ class OpenAICompatibleChatClient:
         )
         try:
             with self.opener(request, timeout=self.timeout) as response:
-                yield from _iter_sse_json(response)
+                self._set_active_response(response)
+                try:
+                    for event in _iter_sse_json(response):
+                        _raise_if_cancelled(cancel_event)
+                        yield event
+                finally:
+                    self._clear_active_response(response)
         except urllib.error.HTTPError as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             raise OpenAICompatibleClientError(
                 "http_error",
                 _http_error_message(exc),
                 status_code=exc.code,
             ) from exc
         except (TimeoutError, socket.timeout) as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             raise OpenAICompatibleClientError(
                 "timeout",
                 f"OpenAI-compatible endpoint timed out after {self.timeout} seconds.",
@@ -219,16 +273,39 @@ class OpenAICompatibleChatClient:
         except OpenAICompatibleClientError:
             raise
         except urllib.error.URLError as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             reason = _safe_url_error_reason(exc)
             raise OpenAICompatibleClientError(
                 "url_error",
                 f"OpenAI-compatible endpoint request failed: {reason}.",
             ) from exc
-        except OSError as exc:
+        except (OSError, ValueError, http.client.HTTPException) as exc:
+            _raise_if_cancelled(cancel_event, cause=exc)
             raise OpenAICompatibleClientError(
                 "connection_error",
                 f"OpenAI-compatible endpoint request failed: {type(exc).__name__}.",
             ) from exc
+
+    def cancel_active_request(self) -> None:
+        """Close the active response so a blocking read returns promptly."""
+
+        with self._active_response_lock:
+            response = self._active_response
+        if response is None:
+            return
+        try:
+            response.close()
+        except OSError:
+            pass
+
+    def _set_active_response(self, response: Any) -> None:
+        with self._active_response_lock:
+            object.__setattr__(self, "_active_response", response)
+
+    def _clear_active_response(self, response: Any) -> None:
+        with self._active_response_lock:
+            if self._active_response is response:
+                object.__setattr__(self, "_active_response", None)
 
 
 class OpenAICompatibleAdapter:
@@ -248,6 +325,7 @@ class OpenAICompatibleAdapter:
         stream_callback: Callable[[str, str], None] | None = None,
         tool_executor: ToolExecutor | None = None,
         max_tool_rounds: int = 8,
+        request_cancellation: RequestCancellation | None = None,
     ) -> None:
         self.provider_id = _normalize_non_empty_string(provider_id, "provider_id")
         if not isinstance(stream, bool):
@@ -256,6 +334,11 @@ class OpenAICompatibleAdapter:
             raise AdapterError("stream_callback must be callable or None.")
         self.stream = stream
         self.stream_callback = stream_callback
+        if request_cancellation is not None and not callable(
+            getattr(request_cancellation, "request", None)
+        ):
+            raise AdapterError("request_cancellation must provide request().")
+        self.request_cancellation = request_cancellation
         if tool_executor is not None:
             if not hasattr(tool_executor, "specs") or not callable(getattr(tool_executor, "call", None)):
                 raise AdapterError("tool_executor must provide specs and call().")
@@ -333,7 +416,7 @@ class OpenAICompatibleAdapter:
                 )
                 response = None
             else:
-                response = self.client.create_chat_completion(messages, model=model_id)
+                response = self._create_chat_completion(messages, model=model_id)
                 assistant_content, thinking = _extract_assistant_message(response)
                 usage = _normalize_usage(response.get("usage"))
         except OpenAICompatibleClientError as exc:
@@ -416,7 +499,7 @@ class OpenAICompatibleAdapter:
         usage: Mapping[str, object] | None = None
 
         for _round in range(self.max_tool_rounds):
-            response = self.client.create_chat_completion(
+            response = self._create_chat_completion(
                 conversation,
                 model=model_id,
                 tools=tool_specs,
@@ -473,29 +556,56 @@ class OpenAICompatibleAdapter:
     ) -> tuple[str | None, str | None, Mapping[str, object] | None]:
         accumulator = _StreamingAssistantAccumulator(self._notify_stream)
         usage: Mapping[str, object] | None = None
-        for event in self.client.stream_chat_completion(messages, model=model_id):
-            event_usage = _normalize_usage(event.get("usage"))
-            if event_usage is not None:
-                usage = event_usage
-            choices = event.get("choices")
-            if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices:
-                continue
-            first = choices[0]
-            if not isinstance(first, Mapping):
-                continue
-            delta = first.get("delta") or first.get("message")
-            if not isinstance(delta, Mapping):
-                continue
-            accumulator.feed_reasoning(
-                _extract_stream_text_value(
-                    delta.get("reasoning_content")
-                    or delta.get("reasoning")
-                    or delta.get("thinking")
+        with self._request_scope() as cancel_event:
+            for event in self.client.stream_chat_completion(
+                messages,
+                model=model_id,
+                cancel_event=cancel_event,
+            ):
+                event_usage = _normalize_usage(event.get("usage"))
+                if event_usage is not None:
+                    usage = event_usage
+                choices = event.get("choices")
+                if not isinstance(choices, Sequence) or isinstance(choices, (str, bytes)) or not choices:
+                    continue
+                first = choices[0]
+                if not isinstance(first, Mapping):
+                    continue
+                delta = first.get("delta") or first.get("message")
+                if not isinstance(delta, Mapping):
+                    continue
+                accumulator.feed_reasoning(
+                    _extract_stream_text_value(
+                        delta.get("reasoning_content")
+                        or delta.get("reasoning")
+                        or delta.get("thinking")
+                    )
                 )
-            )
-            accumulator.feed_content(_extract_stream_text_value(delta.get("content")))
+                accumulator.feed_content(_extract_stream_text_value(delta.get("content")))
         accumulator.finish()
         return accumulator.response, accumulator.thinking, usage
+
+    def _create_chat_completion(
+        self,
+        messages: Sequence[Mapping[str, object]],
+        *,
+        model: str,
+        tools: Sequence[Mapping[str, object]] | None = None,
+        tool_choice: str | Mapping[str, object] | None = None,
+    ) -> Mapping[str, object]:
+        with self._request_scope() as cancel_event:
+            return self.client.create_chat_completion(
+                messages,
+                model=model,
+                tools=tools,
+                tool_choice=tool_choice,
+                cancel_event=cancel_event,
+            )
+
+    def _request_scope(self) -> ContextManager[threading.Event | None]:
+        if self.request_cancellation is None:
+            return nullcontext(None)
+        return self.request_cancellation.request(self.client.cancel_active_request)
 
     def _notify_stream(self, kind: str, value: str) -> None:
         if self.stream_callback is not None:
@@ -564,6 +674,7 @@ def _build_agentx_messages(
             "You are running behind AgentX as a private OpenAI-compatible provider adapter.",
             "Treat this as a plan-safe and execution-safe advisory run.",
             "Do not claim that files were edited, commands were run, patches were applied, or external systems were changed.",
+            "When web research tools are available, use web_fetch for a user-named website or URL; use web_search only when the user did not name a source.",
             "Return a concise assistant response that AgentX can store as the run outcome summary.",
         )
     )
@@ -1167,4 +1278,5 @@ __all__ = [
     "OpenAICompatibleAdapter",
     "OpenAICompatibleChatClient",
     "OpenAICompatibleClientError",
+    "RequestCancellation",
 ]

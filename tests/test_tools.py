@@ -1,9 +1,10 @@
 import shutil
+import socket
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentx.tools import ControlledWorkspaceTools, ReadOnlyWorkspaceTools
+from agentx.tools import ControlledWorkspaceTools, ReadOnlyWorkspaceTools, WebResearchTools
 
 
 class ReadOnlyWorkspaceToolsTests(unittest.TestCase):
@@ -70,6 +71,152 @@ class ReadOnlyWorkspaceToolsTests(unittest.TestCase):
         self.assertTrue(diff.ok)
         self.assertEqual(["git", "status", "--short", "--untracked-files=all"], run.call_args_list[0].args[0])
         self.assertIn("--no-ext-diff", run.call_args_list[1].args[0])
+
+
+class _WebResponse:
+    def __init__(self, body: bytes, *, status: int = 200, headers: dict[str, str] | None = None):
+        self.body = body
+        self.status = status
+        self.headers = headers or {"Content-Type": "text/html; charset=utf-8"}
+        self.closed = False
+
+    def read(self, amount: int = -1) -> bytes:
+        return self.body if amount < 0 else self.body[:amount]
+
+    def close(self) -> None:
+        self.closed = True
+
+
+def _public_resolver(host, port, *, type):
+    del host, port, type
+    return [(socket.AF_INET, socket.SOCK_STREAM, 6, "", ("93.184.216.34", 443))]
+
+
+class WebResearchToolsTests(unittest.TestCase):
+    def test_tools_are_hidden_without_an_approval_callback(self):
+        tools = WebResearchTools()
+
+        self.assertEqual((), tools.specs)
+        result = tools.call("web_search", {"query": "AgentX"})
+        self.assertFalse(result.ok)
+        self.assertEqual("approval denied", result.error)
+
+    def test_search_requires_approval_before_sending_the_query(self):
+        opener = mock.Mock()
+        approvals = []
+        tools = WebResearchTools(
+            approval_callback=lambda operation, details: approvals.append((operation, details)) or False,
+            opener=opener,
+            resolver=_public_resolver,
+        )
+
+        result = tools.call("web_search", {"query": "current Halo ROCm support"})
+
+        self.assertFalse(result.ok)
+        self.assertEqual("approval denied", result.error)
+        self.assertEqual("web.search", approvals[0][0])
+        self.assertEqual("current Halo ROCm support", approvals[0][1]["query"])
+        opener.assert_not_called()
+
+    def test_search_parses_compact_results_and_unwraps_duckduckgo_links(self):
+        body = b"""
+            <a class='result__a' href='//duckduckgo.com/l/?uddg=https%3A%2F%2Fexample.com%2Fguide'>
+              Example &amp; guide
+            </a>
+            <div class='result__snippet'>A current <b>reference</b> page.</div>
+        """
+        response = _WebResponse(body)
+        opener = mock.Mock(return_value=response)
+        tools = WebResearchTools(
+            approval_callback=lambda operation, details: True,
+            opener=opener,
+            resolver=_public_resolver,
+        )
+
+        result = tools.call("web_search", {"query": "example guide", "max_results": 1})
+
+        self.assertTrue(result.ok)
+        self.assertEqual("example guide", result.output["query"])
+        self.assertEqual("https://example.com/guide", result.output["results"][0]["url"])
+        self.assertEqual("Example & guide", result.output["results"][0]["title"])
+        self.assertEqual("A current reference page.", result.output["results"][0]["snippet"])
+        self.assertIn("q=example+guide", opener.call_args.args[0].full_url)
+        self.assertTrue(response.closed)
+
+    def test_search_falls_back_to_brave_after_a_duckduckgo_bot_challenge(self):
+        challenge = _WebResponse(b"<div class='anomaly-modal'>Unfortunately, bots use DuckDuckGo too.</div>")
+        body = _WebResponse(b"""
+            <div class='snippet' data-type='web'>
+              <a href='https://example.com/current'><div class='title search-snippet-title'>
+                Current example
+              </div></a>
+              <div class='generic-snippet'>A concise current reference.</div>
+            </div>
+        """)
+        approvals = []
+        tools = WebResearchTools(
+            approval_callback=lambda operation, details: approvals.append(details) or True,
+            opener=mock.Mock(side_effect=[challenge, body]),
+            resolver=_public_resolver,
+        )
+
+        result = tools.call("web_search", {"query": "current example"})
+
+        self.assertTrue(result.ok)
+        self.assertEqual("Brave Search", result.output["source"])
+        self.assertEqual(2, len(approvals))
+        self.assertEqual("DuckDuckGo Search", approvals[0]["source"])
+        self.assertEqual("Brave Search", approvals[1]["source"])
+        self.assertIn("bot challenge", approvals[1]["reason"])
+        self.assertEqual(
+            {
+                "title": "Current example",
+                "url": "https://example.com/current",
+                "snippet": "A concise current reference.",
+            },
+            result.output["results"][0],
+        )
+
+    def test_fetch_strips_markup_and_honors_the_model_context_cap(self):
+        body = (
+            b"<html><head><title>Example title</title><script>secret()</script></head>"
+            b"<body><main>" + (b"Useful text " * 200) + b"</main></body></html>"
+        )
+        response = _WebResponse(body)
+        tools = WebResearchTools(
+            approval_callback=lambda operation, details: True,
+            opener=mock.Mock(return_value=response),
+            resolver=_public_resolver,
+        )
+
+        result = tools.call("web_fetch", {"url": "https://example.com/article", "max_chars": 500})
+
+        self.assertTrue(result.ok)
+        self.assertEqual("Example title", result.output["title"])
+        self.assertNotIn("secret", result.output["content"])
+        self.assertLessEqual(len(result.output["content"]), 500)
+        self.assertTrue(result.output["truncated"])
+        self.assertTrue(response.closed)
+
+    def test_fetch_rejects_non_public_redirect_before_a_second_request(self):
+        redirect = _WebResponse(
+            b"",
+            status=302,
+            headers={"Location": "https://127.0.0.1/internal"},
+        )
+        opener = mock.Mock(return_value=redirect)
+        tools = WebResearchTools(
+            approval_callback=lambda operation, details: True,
+            opener=opener,
+            resolver=_public_resolver,
+        )
+
+        result = tools.call("web_fetch", {"url": "https://example.com/redirect"})
+
+        self.assertFalse(result.ok)
+        self.assertIn("non-public IP", result.error)
+        self.assertEqual(1, opener.call_count)
+        self.assertTrue(redirect.closed)
 
 
 class ControlledWorkspaceToolsTests(unittest.TestCase):
