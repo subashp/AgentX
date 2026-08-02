@@ -237,6 +237,19 @@ WEB_RESEARCH_TOOL_SPECS: tuple[ToolSpec, ...] = (
             },
         },
     ),
+    ToolSpec(
+        "web_fetch_document",
+        "Fetch and extract a bounded public HTTPS text, JSON, HTML, or PDF document. PDF support is optional.",
+        {
+            "type": "object",
+            "required": ["url"],
+            "properties": {
+                "url": {"type": "string", "minLength": 1, "maxLength": 2048},
+                "max_chars": {"type": "integer", "minimum": 500, "maximum": 12000},
+                "max_pages": {"type": "integer", "minimum": 1, "maximum": 32},
+            },
+        },
+    ),
 )
 
 
@@ -458,6 +471,7 @@ class WebResearchTools:
         approval_callback: ApprovalCallback | None = None,
         opener: Callable[..., object] | None = None,
         resolver: Callable[..., object] | None = None,
+        document_extractor: Any = None,
     ) -> None:
         if approval_callback is not None and not callable(approval_callback):
             raise ToolError("approval_callback must be callable or None")
@@ -468,6 +482,7 @@ class WebResearchTools:
         self.approval_callback = approval_callback
         self._opener = opener
         self._resolver = resolver or socket.getaddrinfo
+        self._document_extractor = document_extractor
 
     @property
     def specs(self) -> tuple[ToolSpec, ...]:
@@ -475,11 +490,16 @@ class WebResearchTools:
 
     def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
         args = dict(arguments or {})
-        name = {"web.search": "web_search", "web.fetch": "web_fetch"}.get(name, name)
+        name = {
+            "web.search": "web_search",
+            "web.fetch": "web_fetch",
+            "web.fetch_document": "web_fetch_document",
+        }.get(name, name)
         try:
             output = {
                 "web_search": self.search,
                 "web_fetch": self.fetch,
+                "web_fetch_document": self.fetch_document,
             }[name](args)
         except (KeyError, ToolError, OSError, UnicodeError, ValueError) as exc:
             return ToolResult(name=name, ok=False, error=str(exc))
@@ -598,6 +618,32 @@ class WebResearchTools:
         }
         if title:
             payload["title"] = title
+        return payload
+
+    def fetch_document(self, args: Mapping[str, object]) -> dict[str, object]:
+        from .documents import DocumentExtractor, DocumentExtractionError
+
+        url = _normalize_public_https_url(args.get("url"))
+        max_chars = _bounded_int(args.get("max_chars", 12_000), "max_chars", 500, 12_000)
+        max_pages = _bounded_int(args.get("max_pages", 32), "max_pages", 1, 32)
+        if not self._approve(
+            "web.fetch_document",
+            {"url": url, "max_chars": max_chars, "max_pages": max_pages},
+        ):
+            raise ToolError("approval denied")
+        final_url, content_type, body, source_truncated = self._open_public_https(url)
+        extractor = self._document_extractor or DocumentExtractor(max_chars=max_chars, max_pages=max_pages)
+        try:
+            document = extractor.extract(
+                body,
+                media_type=content_type or "application/octet-stream",
+                filename=urllib.parse.urlsplit(final_url).path,
+            )
+        except DocumentExtractionError as exc:
+            raise ToolError(str(exc)) from exc
+        payload = document.as_dict()
+        payload["url"] = final_url
+        payload["truncated"] = bool(payload.get("truncated")) or source_truncated
         return payload
 
     def _approve(self, operation: str, details: Mapping[str, object]) -> bool:

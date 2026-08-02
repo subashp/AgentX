@@ -218,6 +218,31 @@ class WebResearchToolsTests(unittest.TestCase):
         self.assertEqual(1, opener.call_count)
         self.assertTrue(redirect.closed)
 
+    def test_fetch_document_uses_bounded_extractor_for_pdf_response(self):
+        class FakeExtractor:
+            def extract(self, body, *, media_type, filename):
+                self.args = (body, media_type, filename)
+                from agentx.documents import ExtractedDocument
+
+                return ExtractedDocument(media_type=media_type, text="document text", page_count=2)
+
+        extractor = FakeExtractor()
+        response = _WebResponse(b"pdf bytes", headers={"Content-Type": "application/pdf"})
+        tools = WebResearchTools(
+            approval_callback=lambda operation, details: True,
+            opener=mock.Mock(return_value=response),
+            resolver=_public_resolver,
+            document_extractor=extractor,
+        )
+
+        result = tools.call("web_fetch_document", {"url": "https://example.com/report.pdf", "max_pages": 2})
+
+        self.assertTrue(result.ok)
+        self.assertEqual("document text", result.output["content"])
+        self.assertEqual("application/pdf", extractor.args[1])
+        self.assertEqual("/report.pdf", extractor.args[2])
+        self.assertTrue(response.closed)
+
 
 class ControlledWorkspaceToolsTests(unittest.TestCase):
     def setUp(self):

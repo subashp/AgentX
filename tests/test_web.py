@@ -76,6 +76,20 @@ class WebAccessServiceTests(unittest.TestCase):
         self.assertEqual(1, len(tools.calls))
         self.assertEqual(1, len(approvals))
 
+    def test_service_exposes_document_fetch_results_and_citations(self):
+        tools = _FakeWebTools(ToolResult(
+            name="web_fetch_document",
+            ok=True,
+            output={"url": "https://example.com/report.pdf", "content": "report", "media_type": "application/pdf"},
+        ))
+        service = WebAccessService(research_tools=tools)
+
+        result = service.fetch_document("https://example.com/report.pdf", max_pages=2)
+
+        self.assertEqual("application/pdf", result["media_type"])
+        self.assertEqual("https://example.com/report.pdf", result["citations"][0]["url"])
+        self.assertEqual("web_fetch_document", tools.calls[0][0])
+
     def test_cache_expires_and_evicts_old_entries(self):
         current = [0.0]
         cache = WebCache(max_entries=1, ttl_seconds=10, clock=lambda: current[0])

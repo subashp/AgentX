@@ -109,15 +109,17 @@ older context, and keeps a small cross-session memory. Runtime database files
 must remain local.
 
 When a browser chat needs current public information, Qwen can request the
-same bounded `web_search` and `web_fetch` tools available to AgentX. The UI
-permits these requests automatically; a generic request searches DuckDuckGo
-(with a Brave fallback), while a named site is fetched directly. The bounded
-result is then supplied to Qwen for its answer. AgentX CLI continues to ask
-for confirmation before every web request, and external/machine API clients
-do not receive these browser web tools. The UI is still limited to public
-HTTPS pages and bounded output, but an unauthenticated public tunnel lets any
-visitor induce those requests, so do not expose it publicly until authentication
-is configured.
+same bounded `web_search`, `web_fetch`, and `web_fetch_document` tools available
+to AgentX. The UI permits these requests automatically; a generic request
+searches DuckDuckGo (with a Brave fallback), while a named site is fetched
+directly. The UI also has optional Playwright browser tools for navigation,
+page text, form interaction, and screenshots. Results include bounded text and
+citations, and are supplied to Qwen for its answer. AgentX CLI continues to ask
+for confirmation before every web request or browser side effect, and
+external/machine API clients do not receive these tools. The UI is still
+limited to public HTTPS pages and bounded output, but an unauthenticated public
+tunnel lets any visitor induce these requests, so do not expose it publicly
+until authentication is configured.
 
 External OpenAI-compatible clients use the standard endpoint:
 

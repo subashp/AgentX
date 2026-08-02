@@ -119,6 +119,19 @@ only and reject credentials, non-default ports, localhost, and private-network
 addresses. Non-interactive plans do not expose web tools, preventing unattended
 network access.
 
+The same shared web layer also exposes `web_fetch_document` for bounded HTML,
+JSON, text, Markdown, and optional PDF extraction. Results include normalized
+citations and use a small approval-aware local cache. Browser interaction is
+optional and uses Playwright tools such as `browser_open`, `browser_text`,
+`browser_click`, `browser_fill`, and `browser_screenshot`.
+
+Install optional capabilities when needed:
+
+```bash
+python -m pip install -e ".[web,browser]"
+python -m playwright install chromium
+```
+
 Use `/providers`, `/provider`, `/context`, `/help`, and `/quit` in the
 interactive session. Press `Esc` to cancel an active private-model request or
 an internet-approval prompt and return to the CLI. Run `agentx providers list`

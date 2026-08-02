@@ -153,6 +153,15 @@ class WebAccessService:
                 ))
             except (TypeError, ValueError, WebAccessError, ToolError) as exc:
                 return ToolResult(name=canonical_name, ok=False, error=str(exc))
+        if canonical_name == "web_fetch_document":
+            try:
+                return ToolResult(name=canonical_name, ok=True, output=self.fetch_document(
+                    args.get("url", ""),
+                    max_chars=args.get("max_chars", 12_000),
+                    max_pages=args.get("max_pages", 32),
+                ))
+            except (TypeError, ValueError, WebAccessError, ToolError) as exc:
+                return ToolResult(name=canonical_name, ok=False, error=str(exc))
         return self._research_tools.call(name, arguments)
 
     def search(self, query: str, *, max_results: int = 5) -> dict[str, object]:
@@ -178,6 +187,19 @@ class WebAccessService:
             return cached
         result = self._require_mapping(self._research_tools.call("web_fetch", details))
         normalized = self._with_fetch_citations(result)
+        self._store(key, normalized)
+        return normalized
+
+    def fetch_document(self, url: str, *, max_chars: int = 12_000, max_pages: int = 32) -> dict[str, object]:
+        """Fetch and extract a bounded public document with source metadata."""
+
+        key = f"document:{url}:{max_chars}:{max_pages}"
+        details = {"url": url, "max_chars": max_chars, "max_pages": max_pages}
+        cached = self._cached(key, "web.fetch_document", details)
+        if cached is not None:
+            return cached
+        result = self._require_mapping(self._research_tools.call("web_fetch_document", details))
+        normalized = self._with_document_citations(result)
         self._store(key, normalized)
         return normalized
 
@@ -212,6 +234,15 @@ class WebAccessService:
         return normalized
 
     def _with_fetch_citations(self, result: Mapping[str, object]) -> dict[str, object]:
+        normalized = dict(result)
+        retrieved_at = self._retrieved_at()
+        url = str(result.get("url", ""))
+        title = str(result.get("title", url))
+        normalized["citations"] = [Citation(title=title, url=url, retrieved_at=retrieved_at).as_dict()] if url else []
+        normalized["retrieved_at"] = retrieved_at
+        return normalized
+
+    def _with_document_citations(self, result: Mapping[str, object]) -> dict[str, object]:
         normalized = dict(result)
         retrieved_at = self._retrieved_at()
         url = str(result.get("url", ""))

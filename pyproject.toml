@@ -11,6 +11,10 @@ readme = "README.md"
 requires-python = ">=3.11"
 dependencies = []
 
+[project.optional-dependencies]
+web = ["pypdf>=5"]
+browser = ["playwright>=1.40"]
+
 [project.scripts]
 agentx = "agentx.cli:main"
 
