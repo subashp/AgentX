@@ -183,6 +183,25 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertNotIn("test-secret-key", json.dumps(result.as_dict()))
         self.assertNotIn("test-secret-key", json.dumps(payload))
 
+    def test_prompt_includes_agentmemory_prompt_packet(self):
+        adapter = OpenAICompatibleAdapter(base_url=self.base_url, model="local-coder")
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(prompt="Use memory", provider="private-openai-compatible"),
+                context_map={
+                    "agentmemory_prompt": {
+                        "rendered_text": "## long-term memory\n- [generic/note] compact updates"
+                    }
+                },
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        user_content = self.server.requests[0]["json"]["messages"][1]["content"]
+        self.assertIn("Policy-approved memory:", user_content)
+        self.assertIn("compact updates", user_content)
+
     def test_auth_header_is_omitted_when_api_key_is_not_supplied(self):
         adapter = OpenAICompatibleAdapter(base_url=self.base_url, model="local-coder")
 

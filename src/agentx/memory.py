@@ -126,6 +126,34 @@ def append_interaction_events(
     }
 
 
+def agentmemory_provider_class(agentx_provider_class: str) -> str:
+    if agentx_provider_class == "private":
+        return "local_private"
+    return "external_public"
+
+
+def assemble_memory_prompt_packet(
+    paths: AgentXPaths,
+    *,
+    provider_class: str,
+    query: str = "",
+    current_prompt: str = "",
+) -> dict[str, Any] | None:
+    db_path = agentmemory_db_path(paths)
+    if not db_path.exists():
+        return None
+    agentmemory = load_agentmemory_module()
+    store = agentmemory.SQLiteMemoryStore(db_path)
+    packet = agentmemory.MemoryPromptAssembler(store).assemble(
+        provider_class=agentmemory_provider_class(provider_class),
+        query=query,
+        current_prompt=current_prompt,
+    )
+    payload = packet.as_dict()
+    payload["rendered_text"] = packet.render_text()
+    return payload
+
+
 class AgentMemoryTools:
     """Expose AgentMemory operations as model-callable tools with AgentX policy."""
 

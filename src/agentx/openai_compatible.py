@@ -692,6 +692,9 @@ def _build_agentx_messages(
     )
     if context_text:
         lines.extend(("", "Policy-approved context contents:", context_text))
+    memory_text = _read_visible_memories(context_map=context_map)
+    if memory_text:
+        lines.extend(("", "Policy-approved memory:", memory_text))
     if run.task_hints:
         lines.append("Task hints:")
         lines.extend(f"- {hint}" for hint in run.task_hints)
@@ -750,6 +753,32 @@ def _read_visible_context(
         sections.append(f"--- {raw_path} ---\n{content}{suffix}")
         total_characters += len(content) + len(raw_path) + 10
     return "\n\n".join(sections)
+
+
+def _read_visible_memories(*, context_map: Mapping[str, object] | None) -> str:
+    if context_map is None:
+        return ""
+    packet = context_map.get("agentmemory_prompt")
+    if isinstance(packet, Mapping):
+        rendered = packet.get("rendered_text")
+        if isinstance(rendered, str) and rendered.strip():
+            return rendered.strip()[:12_000]
+    visible_context = context_map.get("provider_visible_context")
+    if not isinstance(visible_context, Mapping):
+        return ""
+    memories = visible_context.get("visible_memories")
+    if not isinstance(memories, Sequence) or isinstance(memories, (str, bytes)):
+        return ""
+    sections: list[str] = []
+    for memory in memories:
+        if not isinstance(memory, Mapping):
+            continue
+        memory_id = memory.get("memory_id")
+        text = memory.get("text")
+        classification = memory.get("classification")
+        if isinstance(memory_id, str) and isinstance(text, str) and text.strip():
+            sections.append(f"- [{classification}] {memory_id}: {text.strip()}")
+    return "\n".join(sections)[:12_000]
 
 
 def _chat_completions_url(base_url: str) -> str:

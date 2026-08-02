@@ -74,6 +74,14 @@ class AgentMemoryBridgeTests(unittest.TestCase):
                 privacy_class="generic",
             )
         )
+        store.remember(
+            MemoryRecord(
+                memory_id="private-agentmemory-note",
+                content="Private local-only note.",
+                summary="private local-only note",
+                privacy_class="private",
+            )
+        )
 
         result = execute_plan_mode(
             settings=settings,
@@ -81,8 +89,12 @@ class AgentMemoryBridgeTests(unittest.TestCase):
             session_id="agentmemory-load",
             prompt="Plan with memory",
         )
+        context_map = json.loads((result.stored_run.root / "context-map.json").read_text(encoding="utf-8"))
         memory_map = json.loads((result.stored_run.root / "memory-map.json").read_text(encoding="utf-8"))
         self.assertEqual(["agentmemory-note"], memory_map["included_memories"])
+        self.assertIn("agentmemory_prompt", context_map)
+        self.assertIn("compact AgentX answers", context_map["agentmemory_prompt"]["rendered_text"])
+        self.assertIn("private-agentmemory-note", memory_map["agentmemory_omitted_memory_ids"])
 
     def make_settings(self):
         root = self.fixture_root / "state"

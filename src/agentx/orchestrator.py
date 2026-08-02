@@ -6,6 +6,7 @@ from dataclasses import dataclass, replace
 from pathlib import Path
 
 from .agentmemory_bridge import merge_agentmemory_records
+from .memory import AgentXMemoryError, assemble_memory_prompt_packet
 from .adapters import (
     AdapterRequest,
     AdapterResult,
@@ -148,7 +149,14 @@ def execute_plan_mode(
         memories=active_memories,
     )
     context_map = _context_map_from_manifest(context_manifest, route)
+    _attach_agentmemory_prompt_packet(
+        context_map,
+        settings=settings,
+        provider_class=provider_class,
+        query=plan_run.prompt,
+    )
     memory_map = _memory_map_from_manifest(context_manifest)
+    _attach_agentmemory_omissions(memory_map, context_map)
     redactions = [entry.as_dict() for entry in context_manifest.redactions]
     selected_adapter = adapter or FakeLocalAdapter()
     provider_selection_error = _provider_selection_error(selected_adapter, route)
@@ -258,7 +266,14 @@ def execute_execute_mode(
         memories=active_memories,
     )
     context_map = _context_map_from_manifest(context_manifest, route)
+    _attach_agentmemory_prompt_packet(
+        context_map,
+        settings=settings,
+        provider_class=provider_class,
+        query=execute_run.prompt,
+    )
     memory_map = _memory_map_from_manifest(context_manifest)
+    _attach_agentmemory_omissions(memory_map, context_map)
     redactions = [entry.as_dict() for entry in context_manifest.redactions]
     validating_adapter = _PatchValidatingExecuteAdapter(
         adapter=adapter or FakeLocalAdapter(),
@@ -611,6 +626,35 @@ def _context_map_from_manifest(
         "policy_decision": manifest_dict["policy_decision"],
         "summary_substitutions": manifest_dict["summary_substitutions"],
     }
+
+
+def _attach_agentmemory_prompt_packet(
+    context_map: dict[str, object],
+    *,
+    settings: Settings,
+    provider_class: str,
+    query: str,
+) -> None:
+    try:
+        packet = assemble_memory_prompt_packet(
+        settings.paths,
+        provider_class=provider_class,
+        query="",
+        current_prompt="",
+    )
+    except AgentXMemoryError:
+        return
+    if packet is not None:
+        context_map["agentmemory_prompt"] = packet
+
+
+def _attach_agentmemory_omissions(memory_map: dict[str, object], context_map: Mapping[str, object]) -> None:
+    packet = context_map.get("agentmemory_prompt")
+    if not isinstance(packet, Mapping):
+        return
+    omitted = packet.get("omitted_memory_ids")
+    if isinstance(omitted, Sequence) and not isinstance(omitted, (str, bytes)):
+        memory_map["agentmemory_omitted_memory_ids"] = [str(item) for item in omitted]
 
 
 def _memory_map_from_manifest(manifest: ContextManifest) -> dict[str, object]:
