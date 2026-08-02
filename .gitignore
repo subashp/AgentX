@@ -4,6 +4,7 @@ AGENTS.md
 .codex/
 .agentx/
 docs/private/
+docs/architecture/
 docs/implementation-plan.md
 
 # Local configuration and credentials
