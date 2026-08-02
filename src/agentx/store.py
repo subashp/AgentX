@@ -82,6 +82,10 @@ class SessionStore:
     def root(self) -> Path:
         return self._paths.sessions
 
+    @property
+    def paths(self) -> AgentXPaths:
+        return self._paths
+
     def path_for_session(self, session_id: str) -> Path:
         return self.root / _normalize_identifier(session_id, "session_id")
 

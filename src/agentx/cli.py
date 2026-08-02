@@ -30,6 +30,7 @@ from .adapters import (
 )
 from .config import ConfigError, ProviderSettings, Settings, load_settings
 from .memory import (
+    AgentMemoryTools,
     AgentXMemoryError,
     append_interaction_events,
     apply_memory_proposal,
@@ -974,6 +975,7 @@ def _plan(
                 ),
             )
             tool_executors = [read_only_tools]
+            tool_executors.append(AgentMemoryTools(settings.paths, user_prompt=prompt))
             if web_approval is not None:
                 tool_executors.append(WebAccessService(approval_callback=web_approval))
                 tool_executors.append(
@@ -1100,6 +1102,9 @@ class _PrivateSubagentRunner:
             allowed_paths=task.context_paths,
         )
         child_tool_executors = [child_tools]
+        child_tool_executors.append(
+            AgentMemoryTools(self.session_store.paths, user_prompt=task.prompt)
+        )
         if self.web_approval is not None:
             child_tool_executors.append(WebAccessService(approval_callback=self.web_approval))
             child_tool_executors.append(

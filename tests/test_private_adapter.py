@@ -9,6 +9,7 @@ from pathlib import Path
 from agentx.adapters import AdapterError, AdapterRequest, execute_adapter_run
 from agentx.config import AgentXPaths
 from agentx.cli import _PrivateSubagentRunner
+from agentx.memory import AgentMemoryTools, call_memory_tool
 from agentx.openai_compatible import (
     OpenAICompatibleAdapter,
     OpenAICompatibleChatClient,
@@ -395,6 +396,71 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         )
         self.assertEqual("tool", second_messages[3]["role"])
         self.assertEqual("agentx-qwen-tool-call-1", second_messages[3]["tool_call_id"])
+
+    def test_tool_loop_executes_memory_search_and_returns_follow_up(self):
+        paths = self.make_paths()
+        remembered = call_memory_tool(
+            paths,
+            "memory_remember",
+            {"content": "User prefers compact engineering updates.", "privacy_class": "generic"},
+        )
+        self.server.response_bodies = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-memory-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "memory_search",
+                                        "arguments": '{"query":"engineering updates"}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Memory says the user prefers compact engineering updates.",
+                        }
+                    }
+                ]
+            },
+        ]
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            tool_executor=AgentMemoryTools(paths, user_prompt="What information do you have about me in memory?"),
+        )
+
+        result = adapter.execute(AdapterRequest(run=AgentRun(prompt="What do you remember?", provider="private-openai-compatible")))
+
+        self.assertEqual("success", result.status)
+        self.assertEqual(["memory_search"], result.outcome["tools_used"])
+        second_messages = self.server.requests[1]["json"]["messages"]
+        self.assertIn(remembered["memory_id"], second_messages[3]["content"])
+
+    def test_memory_tool_rejects_mutation_without_user_intent(self):
+        paths = self.make_paths()
+        tools = AgentMemoryTools(paths, user_prompt="What do you know about me?")
+
+        result = tools.call(
+            "memory_remember",
+            {"content": "secret inferred preference", "privacy_class": "private"},
+        )
+
+        self.assertFalse(result.ok)
+        self.assertIn("requires explicit user intent", result.error)
 
     def test_tool_loop_rejects_malformed_raw_qwen_tool_call(self):
         self.server.response_body["choices"][0]["message"] = {
