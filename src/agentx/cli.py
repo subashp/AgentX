@@ -451,7 +451,8 @@ def _interactive(
             return 0
         if command in {"/help", "help"}:
             stdout.write(
-                "Commands: /provider [id|auto], /providers, /context [clear|path...], /help, /quit. "
+                "Commands: /provider [id|auto], /providers, /context [clear|path...], "
+                "/memory [search|remember|show|correct|forget|proposals|apply], /help, /quit. "
                 "Any other input is treated as a coding task; press Esc while a private-model request is active to cancel it.\n"
             )
             continue
@@ -478,6 +479,9 @@ def _interactive(
                     continue
             selected_provider = requested
             stdout.write(f"Provider changed to {selected_provider}.\n")
+            continue
+        if command == "/memory" or command.startswith("/memory "):
+            _interactive_memory(prompt, settings, stdout, stderr)
             continue
         if command == "/context" or command.startswith("/context "):
             parts = prompt.split(maxsplit=1)
@@ -591,6 +595,84 @@ def _write_custom_provider_startup_warning(settings, statuses, stdout) -> None:
         )
     else:
         stdout.write("Check the endpoint and model settings before selecting the custom provider.\n")
+
+
+def _interactive_memory(prompt: str, settings, stdout: TextIO, stderr: TextIO) -> None:
+    try:
+        tokens = shlex.split(prompt)
+    except ValueError as exc:
+        stderr.write(f"agentx: invalid /memory command: {exc}\n")
+        return
+    args = tokens[1:]
+    if not args:
+        args = ["search", ""]
+    command = args[0].lower()
+    try:
+        if command == "search":
+            query = " ".join(args[1:]) if len(args) > 1 else ""
+            payload = call_memory_tool(settings.paths, "memory_search", {"query": query})
+            stdout.write(_format_memory_search(payload))
+            return
+        if command == "remember":
+            privacy_class = None
+            content_tokens: list[str] = []
+            index = 1
+            while index < len(args):
+                token = args[index]
+                if token == "--class" and index + 1 < len(args):
+                    privacy_class = args[index + 1]
+                    index += 2
+                    continue
+                content_tokens.append(token)
+                index += 1
+            if privacy_class not in {"generic", "team", "private"}:
+                stderr.write("agentx: /memory remember requires --class generic|team|private.\n")
+                return
+            if not content_tokens:
+                stderr.write("agentx: /memory remember requires text.\n")
+                return
+            payload = call_memory_tool(
+                settings.paths,
+                "memory_remember",
+                {"content": " ".join(content_tokens), "privacy_class": privacy_class},
+            )
+            stdout.write(_format_memory_record(payload))
+            return
+        if command == "show" and len(args) == 2:
+            payload = call_memory_tool(settings.paths, "memory_show", {"memory_id": args[1]})
+            stdout.write(_format_memory_record(payload))
+            return
+        if command == "correct" and len(args) >= 3:
+            payload = call_memory_tool(
+                settings.paths,
+                "memory_correct",
+                {"memory_id": args[1], "replacement": " ".join(args[2:])},
+            )
+            stdout.write(_format_memory_record(payload))
+            return
+        if command == "forget":
+            if len(args) == 2 and args[1] == "--all":
+                payload = call_memory_tool(settings.paths, "memory_forget", {"all": True, "hard": True})
+            elif len(args) == 2:
+                payload = call_memory_tool(settings.paths, "memory_forget", {"memory_id": args[1], "hard": True})
+            else:
+                stderr.write("agentx: /memory forget requires <memory-id> or --all.\n")
+                return
+            stdout.write(_format_memory_delete(payload))
+            return
+        if command == "proposals":
+            stdout.write(_format_memory_proposals({"proposals": list_memory_proposals(settings.paths)}))
+            return
+        if command == "apply" and len(args) == 2:
+            stdout.write(_format_memory_record(apply_memory_proposal(settings.paths, args[1])))
+            return
+    except AgentXMemoryError as exc:
+        stderr.write(f"agentx: {exc}\n")
+        return
+    stderr.write(
+        "agentx: usage: /memory [search [query]|remember --class <class> <text>|"
+        "show <id>|correct <id> <replacement>|forget <id|--all>|proposals|apply <proposal-id>]\n"
+    )
 
 
 def _route(

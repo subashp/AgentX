@@ -557,6 +557,48 @@ class CliTests(unittest.TestCase):
         self.assertIn("Context paths set:\n  README.md\n  src/agentx\n", stdout.getvalue())
         self.assertIn("Context paths:\n  README.md\n  src/agentx\n", stdout.getvalue())
 
+    def test_interactive_memory_commands_round_trip(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_interactive_memory"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            ),
+            public_providers=("fake-local",),
+        )
+        try:
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                code = cli.run(
+                    ["interactive", "--provider", "fake-local"],
+                    stdout,
+                    stderr,
+                    io.StringIO(
+                        '/memory remember --class private "use local Qwen"\n'
+                        "/memory search Qwen\n"
+                        "/memory forget --all\n"
+                        "/memory search Qwen\n"
+                        "/quit\n"
+                    ),
+                )
+            self.assertEqual(0, code)
+            self.assertEqual("", stderr.getvalue())
+            output = stdout.getvalue()
+            self.assertIn("private", output)
+            self.assertIn("use local Qwen", output)
+            self.assertIn("deleted: ", output)
+            self.assertIn("No memory records found.", output)
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
     def test_interactive_context_can_be_cleared(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
