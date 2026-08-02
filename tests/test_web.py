@@ -1,8 +1,9 @@
 import unittest
+from datetime import datetime, timezone
 
 from agentx.tools import ToolResult, ToolSpec
 from agentx.browser import BrowserToolExecutor
-from agentx.web import WebAccessError, WebAccessService, WebUIAdapter
+from agentx.web import WebAccessError, WebAccessService, WebCache, WebUIAdapter
 
 
 class _FakeWebTools:
@@ -27,7 +28,8 @@ class WebAccessServiceTests(unittest.TestCase):
 
         result = service.search("AgentX", max_results=2)
 
-        self.assertEqual({"results": []}, result)
+        self.assertEqual([], result["results"])
+        self.assertEqual([], result["citations"])
         self.assertEqual([("web_search", {"query": "AgentX", "max_results": 2})], tools.calls)
         self.assertEqual(("web_search", "web_fetch"), tuple(spec.name for spec in service.specs))
 
@@ -55,6 +57,34 @@ class WebAccessServiceTests(unittest.TestCase):
 
         self.assertIn("web_search", {spec.name for spec in adapter.specs})
         self.assertIn("browser_open", {spec.name for spec in adapter.specs})
+
+    def test_service_uses_approved_bounded_cache(self):
+        tools = _FakeWebTools(ToolResult(name="web_fetch", ok=True, output={"url": "https://example.com", "content": "cached"}))
+        cache = WebCache(clock=lambda: 100.0, ttl_seconds=30)
+        approvals = []
+        service = WebAccessService(
+            research_tools=tools,
+            approval_callback=lambda operation, details: approvals.append((operation, details)) or True,
+            cache=cache,
+            clock=lambda: datetime.fromtimestamp(100, timezone.utc),
+        )
+
+        first = service.fetch("https://example.com")
+        second = service.fetch("https://example.com")
+
+        self.assertEqual(first, second)
+        self.assertEqual(1, len(tools.calls))
+        self.assertEqual(1, len(approvals))
+
+    def test_cache_expires_and_evicts_old_entries(self):
+        current = [0.0]
+        cache = WebCache(max_entries=1, ttl_seconds=10, clock=lambda: current[0])
+        self.assertTrue(cache.put("a", {"value": "one"}))
+        self.assertTrue(cache.put("b", {"value": "two"}))
+        self.assertIsNone(cache.get("a"))
+        self.assertEqual({"value": "two"}, cache.get("b"))
+        current[0] = 11.0
+        self.assertIsNone(cache.get("b"))
 
 
 if __name__ == "__main__":

@@ -31,7 +31,7 @@ if str(SOURCE_ROOT) not in sys.path:
 
 from agentx.tools import ToolResult
 from agentx.browser import BrowserToolExecutor
-from agentx.web import WebAccessService, WebUIAdapter
+from agentx.web import WebAccessService, WebCache, WebUIAdapter
 
 # Keep the historical module-level name for integrations and tests that
 # replace the web executor. New code should use WebAccessService directly.
@@ -127,13 +127,16 @@ BROWSER_WEB_TOOL_DESCRIPTIONS = {
 }
 
 WEB_ARTIFACTS_DIR = Path(os.environ.get("AGENTX_HOME", str(Path.home() / ".agentx"))) / "artifacts"
+WEB_CACHE = WebCache()
 
 
 def _build_web_ui_adapter() -> WebUIAdapter:
     """Build the UI adapter with the gateway's explicit web policy callback."""
 
     service = WebAccessService(
-        research_tools=WebResearchTools(approval_callback=lambda operation, details: True)
+        research_tools=WebResearchTools(approval_callback=lambda operation, details: True),
+        cache=WEB_CACHE,
+        approval_callback=lambda operation, details: True,
     )
     browser = BrowserToolExecutor(
         artifacts_dir=WEB_ARTIFACTS_DIR / "browser",
