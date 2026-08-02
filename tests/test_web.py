@@ -1,7 +1,7 @@
 import unittest
 
 from agentx.tools import ToolResult, ToolSpec
-from agentx.web import WebAccessError, WebAccessService
+from agentx.web import WebAccessError, WebAccessService, WebUIAdapter
 
 
 class _FakeWebTools:
@@ -36,6 +36,16 @@ class WebAccessServiceTests(unittest.TestCase):
 
         with self.assertRaisesRegex(WebAccessError, "approval denied"):
             service.fetch("https://example.com")
+
+    def test_ui_adapter_preserves_specs_and_emits_status_only_events(self):
+        tools = _FakeWebTools(ToolResult(name="web_fetch", ok=True, output={"content": "private page text"}))
+        adapter = WebUIAdapter(WebAccessService(research_tools=tools))
+
+        result = adapter.call("web_fetch", {"url": "https://example.com"})
+
+        self.assertEqual("web_fetch", result.name)
+        self.assertEqual({"name": "web_fetch", "ok": True}, adapter.event(result))
+        self.assertNotIn("private page text", adapter.event(result))
 
 
 if __name__ == "__main__":

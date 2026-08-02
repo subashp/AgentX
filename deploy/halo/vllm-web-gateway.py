@@ -30,7 +30,7 @@ if str(SOURCE_ROOT) not in sys.path:
     sys.path.insert(0, str(SOURCE_ROOT))
 
 from agentx.tools import ToolResult
-from agentx.web import WebAccessService
+from agentx.web import WebAccessService, WebUIAdapter
 
 # Keep the historical module-level name for integrations and tests that
 # replace the web executor. New code should use WebAccessService directly.
@@ -126,9 +126,19 @@ BROWSER_WEB_TOOL_DESCRIPTIONS = {
 }
 
 
+def _build_web_ui_adapter() -> WebUIAdapter:
+    """Build the UI adapter with the gateway's explicit web policy callback."""
+
+    service = WebAccessService(
+        research_tools=WebResearchTools(approval_callback=lambda operation, details: True)
+    )
+    return WebUIAdapter(service)
+
+
 def browser_web_tool_specs() -> tuple[dict, ...]:
     specs: list[dict] = []
-    for spec in WebResearchTools(approval_callback=lambda operation, details: True).specs:
+    adapter = _build_web_ui_adapter()
+    for spec in adapter.specs:
         payload = spec.as_dict()
         function = payload["function"]
         function["description"] = BROWSER_WEB_TOOL_DESCRIPTIONS[function["name"]]
@@ -759,8 +769,8 @@ class Handler(BaseHTTPRequestHandler):
             force_final_reply = False
             if web_tools_available and (research_request := browser_research_request(content)):
                 research_name, research_arguments = research_request
-                research_tool = WebResearchTools(approval_callback=lambda operation, details: True)
-                prefetched_result = (research_name, research_tool.call(research_name, research_arguments))
+                web_adapter = _build_web_ui_adapter()
+                prefetched_result = (research_name, web_adapter.call(research_name, research_arguments))
                 conversation = web_result_followup(base_conversation, [prefetched_result])
                 force_final_reply = True
             assistant_message_id = insert_message(session_id, "assistant", "", status="streaming")
@@ -873,7 +883,7 @@ class Handler(BaseHTTPRequestHandler):
                     if tool_round >= MAX_WEB_TOOL_ROUNDS:
                         raise RuntimeError(f"model exceeded the {MAX_WEB_TOOL_ROUNDS}-round web-tool limit")
 
-                    tools = WebResearchTools(approval_callback=lambda operation, details: True)
+                    web_adapter = _build_web_ui_adapter()
                     results: list[tuple[str, ToolResult]] = []
                     for call in calls:
                         arguments = call["arguments"]
@@ -884,10 +894,10 @@ class Handler(BaseHTTPRequestHandler):
                                 error="tool arguments must be a valid JSON object",
                             )
                         else:
-                            result = tools.call(call["name"], arguments)
+                            result = web_adapter.call(call["name"], arguments)
                         self.send_sse(
                             "web_tool_result",
-                            {"name": call["name"], "ok": result.ok},
+                            web_adapter.event(result),
                         )
                         results.append((str(call["name"]), result))
                     # Deliberately do not send native assistant/tool messages

@@ -74,4 +74,31 @@ class WebAccessService:
         return dict(result.output)
 
 
-__all__ = ["WebAccessError", "WebAccessService"]
+class WebUIAdapter:
+    """Translate the shared service into a UI/gateway-friendly contract.
+
+    The adapter intentionally returns only tool status for progress events;
+    fetched content remains in the model conversation and is not broadcast to
+    the browser event stream by default.
+    """
+
+    def __init__(self, service: WebAccessService) -> None:
+        if not isinstance(service, WebAccessService):
+            raise ToolError("service must be a WebAccessService")
+        self.service = service
+
+    @property
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return self.service.specs
+
+    def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
+        return self.service.call(name, arguments)
+
+    @staticmethod
+    def event(result: ToolResult) -> dict[str, object]:
+        """Return the stable progress-event shape shared by UI transports."""
+
+        return {"name": result.name, "ok": result.ok}
+
+
+__all__ = ["WebAccessError", "WebAccessService", "WebUIAdapter"]
