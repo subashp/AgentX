@@ -40,7 +40,7 @@ from .openai_compatible import OpenAICompatibleAdapter, RequestCancellation
 from .orchestrator import OrchestratorError, execute_execute_mode, execute_plan_mode
 from .subagents import SubagentManager, SubagentTask, SubagentTools
 from .tools import ApprovalCallback, ToolError
-from .tool_registry import build_private_tool_executor
+from .tool_registry import build_private_tool_executor, tool_names
 from .workspace import WorkspaceError, normalize_scoped_path
 from .providers import ProviderRegistry
 from .routing import AgentRun, RouteValidationError, Router
@@ -446,7 +446,7 @@ def _interactive(
         if command in {"/help", "help"}:
             stdout.write(
                 "Commands: /provider [id|auto], /providers, /context [clear|path...], "
-                "/memory [search|remember|show|correct|forget|proposals|apply], /execute <task>, /help, /quit. "
+                "/memory [search|remember|show|correct|forget|proposals|apply], /tools, /execute <task>, /help, /quit. "
                 "Any other input is treated as a coding task; press Esc while a private-model request is active to cancel it.\n"
             )
             continue
@@ -476,6 +476,9 @@ def _interactive(
             continue
         if command == "/memory" or command.startswith("/memory "):
             _interactive_memory(prompt, settings, stdout, stderr)
+            continue
+        if command == "/tools":
+            _interactive_tools(selected_provider, settings, context_paths, web_approval, stdout, stderr)
             continue
         if command.startswith("/execute "):
             execute_prompt = prompt.split(maxsplit=1)[1].strip()
@@ -701,6 +704,35 @@ def _interactive_memory(prompt: str, settings, stdout: TextIO, stderr: TextIO) -
         "agentx: usage: /memory [search [query]|remember --class <class> <text>|"
         "show <id>|correct <id> <replacement>|forget <id|--all>|proposals|apply <proposal-id>]\n"
     )
+
+
+def _interactive_tools(
+    selected_provider: str,
+    settings,
+    context_paths: tuple[str, ...],
+    web_approval: ApprovalCallback,
+    stdout: TextIO,
+    stderr: TextIO,
+) -> None:
+    if selected_provider not in {"private-openai-compatible", "auto"}:
+        stdout.write(f"{selected_provider} uses its native CLI tool surface; AgentX does not inject tools.\n")
+        return
+    try:
+        executor = build_private_tool_executor(
+            mode="plan",
+            workspace_root=".",
+            context_paths=context_paths,
+            paths=settings.paths,
+            user_prompt="",
+            approval_callback=web_approval,
+            artifacts_dir=SessionStore(settings.paths).path_for_session("interactive-tools") / "artifacts",
+        )
+    except (ToolError, OSError) as exc:
+        stderr.write(f"agentx: cannot list tools: {exc}\n")
+        return
+    stdout.write("Available AgentX tools:\n")
+    stdout.writelines(f"  {name}\n" for name in tool_names(executor))
+    stdout.write("Use /execute <task> to enable approval-gated workspace_patch and shell_exec.\n")
 
 
 def _route(

@@ -404,8 +404,9 @@ class OpenAICompatibleAdapter:
 
         try:
             tool_calls: tuple[str, ...] = ()
+            tool_trace: tuple[Mapping[str, object], ...] = ()
             if self.tool_executor is not None:
-                response, assistant_content, thinking, usage, tool_calls = self._execute_with_tools(
+                response, assistant_content, thinking, usage, tool_calls, tool_trace = self._execute_with_tools(
                     messages,
                     model_id=model_id,
                 )
@@ -449,6 +450,8 @@ class OpenAICompatibleAdapter:
                 "status": "success",
                 "choice_count": 1 if self.stream and self.tool_executor is None else _choice_count(response),
                 "usage_present": usage is not None,
+                "tools_used": list(tool_calls),
+                "tool_trace": [dict(entry) for entry in tool_trace],
             },
             {
                 "sequence": 4,
@@ -468,6 +471,7 @@ class OpenAICompatibleAdapter:
             outcome["thinking"] = thinking
         if tool_calls:
             outcome["tools_used"] = list(tool_calls)
+            outcome["tool_trace"] = [dict(entry) for entry in tool_trace]
         return AdapterResult(
             provider_id=self.provider_id,
             model_id=model_id,
@@ -490,12 +494,14 @@ class OpenAICompatibleAdapter:
         str | None,
         Mapping[str, object] | None,
         tuple[str, ...],
+        tuple[Mapping[str, object], ...],
     ]:
         if self.tool_executor is None:
             raise AdapterError("tool executor is not configured.")
         conversation: list[Mapping[str, object]] = [dict(message) for message in messages]
         tool_specs = tuple(spec.as_dict() for spec in self.tool_executor.specs)
         used_tools: list[str] = []
+        tool_trace: list[Mapping[str, object]] = []
         usage: Mapping[str, object] | None = None
 
         for _round in range(self.max_tool_rounds):
@@ -521,7 +527,7 @@ class OpenAICompatibleAdapter:
                 raw_qwen_tool_calls = bool(tool_calls)
             if not tool_calls:
                 assistant_content, thinking = _extract_assistant_message(response)
-                return response, assistant_content, thinking, usage, tuple(used_tools)
+                return response, assistant_content, thinking, usage, tuple(used_tools), tuple(tool_trace)
 
             conversation.append(
                 _assistant_tool_message(
@@ -535,6 +541,7 @@ class OpenAICompatibleAdapter:
                 call_id = tool_call["id"]
                 used_tools.append(name)
                 result = _run_tool_call(self.tool_executor, name, tool_call["arguments"])
+                tool_trace.append(_tool_trace_entry(name, result))
                 conversation.append(
                     {
                         "role": "tool",
@@ -996,6 +1003,18 @@ def _run_tool_call(executor: ToolExecutor, name: str, arguments: Mapping[str, ob
     if not isinstance(result, ToolResult):
         return ToolResult(name=name, ok=False, error="tool executor returned an invalid result")
     return result
+
+
+def _tool_trace_entry(name: str, result: ToolResult) -> Mapping[str, object]:
+    payload = result.as_json()
+    entry: dict[str, object] = {
+        "name": name,
+        "ok": result.ok,
+        "result_characters": len(payload),
+    }
+    if not result.ok:
+        entry["error"] = (result.error or "tool failed")[:500]
+    return entry
 
 
 def _extract_assistant_message(response: Mapping[str, object]) -> tuple[str | None, str | None]:

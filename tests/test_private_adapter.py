@@ -342,6 +342,9 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertEqual("success", result.status)
         self.assertEqual("The workspace contains the requested fixture.", result.outcome["summary"])
         self.assertEqual(["workspace.tree"], result.outcome["tools_used"])
+        self.assertEqual("workspace.tree", result.outcome["tool_trace"][0]["name"])
+        self.assertTrue(result.outcome["tool_trace"][0]["ok"])
+        self.assertGreater(result.outcome["tool_trace"][0]["result_characters"], 0)
         self.assertEqual(2, len(self.server.requests))
         first_payload = self.server.requests[0]["json"]
         self.assertEqual("auto", first_payload["tool_choice"])

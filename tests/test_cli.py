@@ -768,6 +768,48 @@ class CliTests(unittest.TestCase):
         self.assertTrue(plan.call_args.kwargs["enable_patch_tool"])
         self.assertTrue(plan.call_args.kwargs["enable_shell_tool"])
 
+    def test_interactive_tools_lists_private_provider_tools(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_interactive_tools"
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            ),
+            private_provider="private-openai-compatible",
+        )
+        statuses = (
+            ProviderStatus(
+                "private-openai-compatible",
+                "Private",
+                "openai_compatible",
+                True,
+                "available",
+            ),
+        )
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                code = cli.run(
+                    ["interactive", "--provider", "private-openai-compatible"],
+                    stdout,
+                    stderr,
+                    io.StringIO("/tools\n/quit\n"),
+                )
+
+        self.assertEqual(0, code)
+        self.assertEqual("", stderr.getvalue())
+        output = stdout.getvalue()
+        self.assertIn("Available AgentX tools:", output)
+        self.assertIn("workspace_tree", output)
+        self.assertIn("memory_search", output)
+        self.assertIn("Use /execute", output)
+
     def test_interactive_web_approval_shows_request_and_requires_yes(self):
         class FlushTrackingStringIO(io.StringIO):
             def __init__(self):
