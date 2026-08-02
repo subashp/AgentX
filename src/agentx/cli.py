@@ -1036,6 +1036,8 @@ def _plan(
         return 2
 
     code = 0 if result.stored_run.result.status == "success" else 2
+    if code == 0:
+        _record_plan_memory_events(settings, session_id, prompt, provider, result)
     _write(
         result.as_dict(),
         json_output,
@@ -1047,6 +1049,27 @@ def _plan(
         ),
     )
     return code
+
+
+def _record_plan_memory_events(settings, session_id: str, prompt: str, provider: str, result) -> None:
+    outcome = result.stored_run.result.outcome
+    if not isinstance(outcome, Mapping):
+        return
+    summary = outcome.get("summary") or outcome.get("response") or ""
+    tool_names = outcome.get("tools_used") or ()
+    if isinstance(tool_names, (str, bytes)) or not isinstance(tool_names, Sequence):
+        tool_names = ()
+    try:
+        append_interaction_events(
+            settings.paths,
+            session_id=session_id,
+            user_prompt=prompt,
+            assistant_summary=str(summary),
+            tool_names=tuple(str(name) for name in tool_names),
+            provider_id=provider,
+        )
+    except AgentXMemoryError:
+        return
 
 
 class _PrivateSubagentRunner:

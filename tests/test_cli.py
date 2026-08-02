@@ -337,6 +337,43 @@ class CliTests(unittest.TestCase):
             if root.exists():
                 shutil.rmtree(root)
 
+    def test_plan_records_memory_events_and_pending_proposal(self):
+        root = Path("tests") / ".tmp_cli_memory_events"
+        if root.exists():
+            shutil.rmtree(root)
+        root.mkdir(parents=True)
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            ),
+            public_providers=("fake-local",),
+        )
+        try:
+            with mock.patch("agentx.cli.load_settings", return_value=settings):
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+                code = cli.run(["plan", "--fake", "remember use compact summaries"], stdout, stderr)
+                self.assertEqual(0, code)
+
+                stdout = io.StringIO()
+                code = cli.run(["--json", "memory", "proposals"], stdout, stderr)
+                self.assertEqual(0, code)
+                proposals = json.loads(stdout.getvalue())["proposals"]
+                self.assertEqual(1, len(proposals))
+                self.assertEqual("pending", proposals[0]["status"])
+
+                stdout = io.StringIO()
+                code = cli.run(["--json", "memory", "search", "compact"], stdout, stderr)
+                self.assertEqual(0, code)
+                self.assertEqual([], json.loads(stdout.getvalue())["memories"])
+        finally:
+            if root.exists():
+                shutil.rmtree(root)
+
     def test_prompt_shorthand_returns_route_decision(self):
         stdout = io.StringIO()
         stderr = io.StringIO()
