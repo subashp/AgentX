@@ -28,6 +28,7 @@ from .adapters import (
     execute_adapter_run,
     execute_fake_run,
 )
+from .autonomy import AutonomousWorkController
 from .config import ConfigError, ProviderSettings, Settings, load_settings
 from .memory import (
     AgentXMemoryError,
@@ -1116,6 +1117,7 @@ def _plan(
                 ),
             )
             tool_mode = "execute" if enable_patch_tool or enable_shell_tool else "plan"
+            autonomous_controller = AutonomousWorkController() if run_mode == "execute" else None
             tool_executor = build_private_tool_executor(
                 mode=tool_mode,
                 workspace_root=scoped_source_root,
@@ -1125,6 +1127,21 @@ def _plan(
                 approval_callback=web_approval,
                 artifacts_dir=SessionStore(settings.paths).path_for_session(session_id) / "artifacts",
                 extra_executors=(SubagentTools(subagent_manager),),
+            )
+            if autonomous_controller is not None:
+                tool_executor = autonomous_controller.wrap_tool_executor(tool_executor)
+            stream_renderer = (
+                _CliStreamRenderer(
+                    stdout,
+                    color=_supports_color(stdout),
+                )
+                if not json_output
+                else None
+            )
+            tool_event_renderer = (
+                _CliToolEventRenderer(stdout)
+                if interactive_output and not json_output
+                else None
             )
             adapter = OpenAICompatibleAdapter(
                 base_url=endpoint,
@@ -1136,22 +1153,17 @@ def _plan(
                     SessionStore(settings.paths).path_for_session(session_id) / "workspace"
                 ).resolve(),
                 stream=not json_output,
-                stream_callback=(
-                    _CliStreamRenderer(
-                        stdout,
-                        color=_supports_color(stdout),
-                    )
-                    if not json_output
-                    else None
-                ),
+                stream_callback=stream_renderer,
                 tool_event_callback=(
-                    _CliToolEventRenderer(stdout)
-                    if interactive_output and not json_output
-                    else None
+                    autonomous_controller.tool_event_callback(tool_event_renderer)
+                    if autonomous_controller is not None
+                    else tool_event_renderer
                 ),
                 tool_executor=tool_executor,
                 request_cancellation=request_cancellation,
             )
+            if autonomous_controller is not None:
+                adapter = autonomous_controller.wrap_adapter(adapter)
 
         run = AgentRun(
             prompt=prompt,
