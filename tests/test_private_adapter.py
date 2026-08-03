@@ -741,6 +741,10 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertTrue((artifact_root / "outcome.json").exists())
         payload = self.server.requests[0]["json"]
         self.assertNotIn("subagent_create", json.dumps(payload))
+        self.assertNotIn("workspace_patch", json.dumps(payload))
+        self.assertNotIn("shell_exec", json.dumps(payload))
+        self.assertNotIn("test_run", json.dumps(payload))
+        self.assertNotIn("git_commit", json.dumps(payload))
         self.assertIn("web_search", json.dumps(payload))
         self.assertIn("child-visible context", payload["messages"][1]["content"])
 

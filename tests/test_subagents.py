@@ -2,6 +2,7 @@ import unittest
 
 from agentx.subagents import (
     MAX_SUBAGENTS,
+    READ_ONLY_SUBAGENT_MODES,
     SubagentError,
     SubagentManager,
     SubagentTools,
@@ -76,6 +77,14 @@ class SubagentManagerTests(unittest.TestCase):
         unavailable = tools.call("subagent_list")
         self.assertFalse(unavailable.ok)
         self.assertIn("unavailable", unavailable.error)
+
+    def test_subagent_rejects_mutating_modes(self):
+        self.assertIn("plan", READ_ONLY_SUBAGENT_MODES)
+
+        with self.assertRaisesRegex(SubagentError, "read-only"):
+            SubagentManager(parent_session_id="parent-1", runner=RecordingRunner()).spawn(
+                {"prompt": "edit files", "mode": "execute"}
+            )
 
     def test_subagent_create_list_and_get_tool_calls(self):
         manager = SubagentManager(parent_session_id="parent-1", runner=RecordingRunner())

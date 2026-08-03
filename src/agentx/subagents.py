@@ -12,6 +12,7 @@ from .workspace import WorkspaceError, normalize_scoped_path
 
 MAX_SUBAGENTS = 10
 MAX_SUBAGENT_DEPTH = 1
+READ_ONLY_SUBAGENT_MODES = frozenset({"plan", "review", "explain", "tests", "docs"})
 
 
 class SubagentError(ValueError):
@@ -33,6 +34,11 @@ class SubagentTask:
         object.__setattr__(self, "prompt", self.prompt.strip())
         object.__setattr__(self, "provider", _normalized_label(self.provider, "provider"))
         object.__setattr__(self, "mode", _normalized_label(self.mode, "mode"))
+        if self.mode not in READ_ONLY_SUBAGENT_MODES:
+            raise SubagentError(
+                "subagents are read-only and only support modes: "
+                + ", ".join(sorted(READ_ONLY_SUBAGENT_MODES))
+            )
         if self.model_tier is not None:
             object.__setattr__(self, "model_tier", _normalized_label(self.model_tier, "model_tier"))
         object.__setattr__(self, "context_paths", _normalized_paths(self.context_paths))
@@ -180,7 +186,7 @@ class SubagentManager:
 SUBAGENT_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "subagent_create",
-        "Create and run one isolated child agent. Child agents cannot create children.",
+        "Create and run one isolated read-only child agent. Child agents cannot edit files, run shell commands, commit, or create children.",
         {
             "type": "object",
             "required": ["prompt"],
