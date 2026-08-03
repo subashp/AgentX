@@ -430,6 +430,7 @@ def validate_patch_paths(
     events: list[WorkspaceEvent] = []
     extracted_paths, path_events = _extract_patch_paths(patch_text)
     events.extend(path_events)
+    events.extend(_patch_format_events(patch_text, extracted_paths))
 
     allowed = set(_normalize_path_sequence(allowed_paths, "allowed_paths"))
     denied = set(_normalize_path_sequence(denied_paths, "denied_paths"))
@@ -516,6 +517,35 @@ def _extract_patch_paths(patch_text: str) -> tuple[tuple[str, ...], tuple[Worksp
             if normalized not in paths:
                 paths.append(normalized)
     return tuple(paths), tuple(events)
+
+
+def _patch_format_events(patch_text: str, paths: Sequence[str]) -> tuple[WorkspaceEvent, ...]:
+    stripped = patch_text.strip()
+    if not stripped:
+        return (
+            WorkspaceEvent(
+                code="patch_empty",
+                severity="error",
+                message="Patch text is empty.",
+            ),
+        )
+    if not paths:
+        return (
+            WorkspaceEvent(
+                code="patch_no_target_paths",
+                severity="error",
+                message="Patch did not include any target paths.",
+            ),
+        )
+    if not any(line.startswith("@@") for line in patch_text.splitlines()):
+        return (
+            WorkspaceEvent(
+                code="patch_hunk_missing",
+                severity="error",
+                message="Patch did not include a unified diff hunk.",
+            ),
+        )
+    return ()
 
 
 def _strip_diff_prefix(path: str) -> str:

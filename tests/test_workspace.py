@@ -210,6 +210,31 @@ class PatchValidationTests(unittest.TestCase):
         )
         self.assertNotIn("do-not-expose-this-marker", repr(payload))
 
+    def test_malformed_patch_without_target_paths_is_rejected(self):
+        result = validate_patch_paths(
+            "not a unified diff",
+            allowed_paths=["src/app.py"],
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertEqual((), result.paths)
+        self.assertIn("patch_no_target_paths", [event.code for event in result.events])
+
+    def test_malformed_patch_without_hunk_is_rejected(self):
+        patch = """diff --git a/src/app.py b/src/app.py
+--- a/src/app.py
++++ b/src/app.py
+"""
+
+        result = validate_patch_paths(
+            patch,
+            allowed_paths=["src/app.py"],
+        )
+
+        self.assertFalse(result.accepted)
+        self.assertEqual(("src/app.py",), result.paths)
+        self.assertIn("patch_hunk_missing", [event.code for event in result.events])
+
 
 if __name__ == "__main__":
     unittest.main()

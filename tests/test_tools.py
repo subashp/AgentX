@@ -324,6 +324,22 @@ class ControlledWorkspaceToolsTests(unittest.TestCase):
         run.assert_not_called()
         self.assertEqual("patch_path_out_of_scope", result.output["validation"]["events"][0]["code"])
 
+    def test_malformed_patch_is_rejected_before_approval(self):
+        approve, calls = self._approval(True)
+        tools = ControlledWorkspaceTools(
+            self.root,
+            allowed_paths=("src/main.py",),
+            approval_callback=approve,
+        )
+
+        with mock.patch("agentx.tools.subprocess.run") as run:
+            result = tools.call("workspace.patch", {"patch": "not a unified diff"})
+
+        self.assertFalse(result.ok)
+        self.assertEqual([], calls)
+        run.assert_not_called()
+        self.assertEqual("patch_no_target_paths", result.output["validation"]["events"][0]["code"])
+
     def test_patch_approval_success_invokes_git_apply_without_shell(self):
         approve, calls = self._approval(True)
         tools = ControlledWorkspaceTools(
