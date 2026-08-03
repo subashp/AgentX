@@ -1,10 +1,11 @@
 import shutil
 import socket
+import sys
 import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentx.tools import ControlledWorkspaceTools, ReadOnlyWorkspaceTools, WebResearchTools
+from agentx.tools import ControlledWorkspaceTools, ReadOnlyWorkspaceTools, TestRunTools, WebResearchTools
 
 
 class ReadOnlyWorkspaceToolsTests(unittest.TestCase):
@@ -386,6 +387,92 @@ class ControlledWorkspaceToolsTests(unittest.TestCase):
         self.assertEqual(argv, run.call_args.args[0])
         self.assertFalse(run.call_args.kwargs["shell"])
         self.assertEqual(self.root.resolve(), run.call_args.kwargs["cwd"])
+
+
+class TestRunToolsTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path("tests") / ".tmp_test_run_tools"
+        shutil.rmtree(self.root, ignore_errors=True)
+        (self.root / "tests").mkdir(parents=True)
+        (self.root / "tests" / "test_sample.py").write_text("import unittest\n", encoding="utf-8")
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _approval(self, decision):
+        calls = []
+
+        def approve(operation, details):
+            calls.append((operation, details))
+            return decision
+
+        return approve, calls
+
+    def test_tools_are_hidden_without_approval_callback(self):
+        tools = TestRunTools(self.root)
+
+        self.assertEqual((), tools.specs)
+
+    def test_approval_denial_does_not_invoke_runner(self):
+        approve, calls = self._approval(False)
+        runner = mock.Mock()
+        tools = TestRunTools(self.root, approval_callback=approve, runner=runner)
+
+        result = tools.call("test_run", {"profile": "python-unittest"})
+
+        self.assertFalse(result.ok)
+        self.assertEqual("approval denied", result.error)
+        self.assertEqual("test.run", calls[0][0])
+        runner.assert_not_called()
+
+    def test_python_unittest_profile_uses_current_python_without_shell(self):
+        approve, calls = self._approval(True)
+        completed = mock.Mock(returncode=0, stdout="ok\n", stderr="")
+        runner = mock.Mock(return_value=completed)
+        tools = TestRunTools(self.root, approval_callback=approve, runner=runner)
+
+        result = tools.call(
+            "test_run",
+            {"profile": "python-unittest", "target": "tests.test_sample", "timeout_seconds": 30},
+        )
+
+        self.assertTrue(result.ok)
+        argv = runner.call_args.args[0]
+        self.assertEqual([sys.executable, "-B", "-m", "unittest", "tests.test_sample"], argv)
+        self.assertFalse(runner.call_args.kwargs["shell"])
+        self.assertEqual(self.root.resolve(), runner.call_args.kwargs["cwd"])
+        self.assertEqual(argv, calls[0][1]["argv"])
+        self.assertEqual("python-unittest", result.output["profile"])
+
+    def test_auto_profile_uses_unittest_discover_for_tests_directory(self):
+        approve, _calls = self._approval(True)
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        runner = mock.Mock(return_value=completed)
+        tools = TestRunTools(self.root, approval_callback=approve, runner=runner)
+
+        result = tools.call("test.run", {"profile": "auto"})
+
+        self.assertTrue(result.ok)
+        self.assertEqual(
+            [sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests"],
+            runner.call_args.args[0],
+        )
+        self.assertEqual("python-unittest", result.output["profile"])
+
+    def test_npm_profile_uses_resolved_executable_without_shell(self):
+        approve, calls = self._approval(True)
+        completed = mock.Mock(returncode=1, stdout="", stderr="failed\n")
+        runner = mock.Mock(return_value=completed)
+        tools = TestRunTools(self.root, approval_callback=approve, runner=runner)
+
+        with mock.patch("agentx.tools.shutil.which", return_value="C:\\tools\\npm.cmd"):
+            result = tools.call("test_run", {"profile": "npm-test", "target": "unit"})
+
+        self.assertFalse(result.ok)
+        self.assertEqual(["C:\\tools\\npm.cmd", "test", "--", "unit"], runner.call_args.args[0])
+        self.assertFalse(runner.call_args.kwargs["shell"])
+        self.assertEqual("npm-test", calls[0][1]["profile"])
+        self.assertEqual("test command returned a non-zero exit code", result.error)
 
 
 if __name__ == "__main__":

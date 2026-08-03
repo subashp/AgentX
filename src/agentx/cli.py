@@ -1725,6 +1725,19 @@ class _InteractiveApproval:
                     self.stdout.write(f"  {item}\n")
             self.stdout.write(f"Working directory: {details.get('cwd', '.')}\n")
             self.stdout.write(f"Timeout: {details.get('timeout_seconds', '')} seconds\n")
+        elif operation == "test.run":
+            self.stdout.write("\nTest run requested by the model.\n")
+            self.stdout.write(f"Profile: {details.get('profile', '')}\n")
+            target = details.get("target")
+            if isinstance(target, str) and target:
+                self.stdout.write(f"Target: {target}\n")
+            argv = details.get("argv", ())
+            if isinstance(argv, Sequence) and not isinstance(argv, (str, bytes)):
+                self.stdout.write("Argv:\n")
+                for item in argv:
+                    self.stdout.write(f"  {item}\n")
+            self.stdout.write(f"Working directory: {details.get('cwd', '.')}\n")
+            self.stdout.write(f"Timeout: {details.get('timeout_seconds', '')} seconds\n")
         elif operation.startswith("browser."):
             self.stdout.write("\nBrowser action requested by the model.\n")
             self.stdout.write(f"Operation: {operation}\n")

@@ -11,6 +11,7 @@ from .tools import (
     CompositeToolExecutor,
     ControlledWorkspaceTools,
     ReadOnlyWorkspaceTools,
+    TestRunTools,
     ToolError,
     ToolExecutor,
 )
@@ -42,6 +43,12 @@ def build_private_tool_executor(
                     approval_callback=approval_callback,
                     enable_patch=True,
                     enable_shell=True,
+                )
+            )
+            executors.append(
+                TestRunTools(
+                    workspace_root,
+                    approval_callback=approval_callback,
                 )
             )
         else:

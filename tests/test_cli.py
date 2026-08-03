@@ -961,7 +961,7 @@ class CliTests(unittest.TestCase):
 
     def test_interactive_approval_shows_shell_and_patch_requests(self):
         stdout = io.StringIO()
-        approval = cli._InteractiveApproval(io.StringIO("yes\nyes\n"), stdout)
+        approval = cli._InteractiveApproval(io.StringIO("yes\nyes\nyes\n"), stdout)
 
         shell_allowed = approval(
             "shell.exec",
@@ -978,9 +978,20 @@ class CliTests(unittest.TestCase):
                 "patch": "--- a/src/agentx/cli.py\n+++ b/src/agentx/cli.py\n",
             },
         )
+        test_allowed = approval(
+            "test.run",
+            {
+                "profile": "python-unittest",
+                "target": "tests.test_cli",
+                "argv": ["python", "-B", "-m", "unittest", "tests.test_cli"],
+                "cwd": ".",
+                "timeout_seconds": 60,
+            },
+        )
 
         self.assertTrue(shell_allowed)
         self.assertTrue(patch_allowed)
+        self.assertTrue(test_allowed)
         rendered = stdout.getvalue()
         self.assertIn("Shell command requested", rendered)
         self.assertIn("Argv:", rendered)
@@ -989,6 +1000,9 @@ class CliTests(unittest.TestCase):
         self.assertIn("Workspace patch requested", rendered)
         self.assertIn("src/agentx/cli.py", rendered)
         self.assertIn("Patch preview:", rendered)
+        self.assertIn("Test run requested", rendered)
+        self.assertIn("Profile: python-unittest", rendered)
+        self.assertIn("Target: tests.test_cli", rendered)
 
     def test_interactive_approval_treats_escape_as_cancelled(self):
         stdout = io.StringIO()

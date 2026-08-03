@@ -7,9 +7,11 @@ import html
 import http.client
 import ipaddress
 import json
+import shutil
 import socket
 import ssl
 import subprocess
+import sys
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -205,6 +207,25 @@ CONTROLLED_TOOL_SPECS: tuple[ToolSpec, ...] = (
             "required": ["argv"],
             "properties": {
                 "argv": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 32},
+                "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
+            },
+        },
+    ),
+)
+
+
+TEST_RUN_TOOL_SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        "test_run",
+        "Run an approved cross-platform test command profile without a shell.",
+        {
+            "type": "object",
+            "properties": {
+                "profile": {
+                    "type": "string",
+                    "enum": ["auto", "python-unittest", "python-pytest", "npm-test"],
+                },
+                "target": {"type": "string", "description": "Optional test target, path, or module."},
                 "timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 120},
             },
         },
@@ -1179,10 +1200,144 @@ class ControlledWorkspaceTools(ReadOnlyWorkspaceTools):
             return False
 
 
+class TestRunTools:
+    """Execute approved test command profiles through argv-only subprocess calls."""
+
+    _PROFILES = frozenset({"auto", "python-unittest", "python-pytest", "npm-test"})
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        approval_callback: ApprovalCallback | None = None,
+        runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    ) -> None:
+        self.root = Path(root).resolve()
+        if approval_callback is not None and not callable(approval_callback):
+            raise ToolError("approval_callback must be callable or None")
+        self.approval_callback = approval_callback
+        self.runner = runner or subprocess.run
+
+    @property
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return TEST_RUN_TOOL_SPECS if self.approval_callback is not None else ()
+
+    def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
+        if name not in {"test.run", "test_run"}:
+            return ToolResult(name=name, ok=False, error="unknown tool")
+        return self.run_tests(dict(arguments or {}))
+
+    def run_tests(self, args: Mapping[str, object]) -> ToolResult:
+        try:
+            profile = _test_profile(args.get("profile", "auto"))
+            target = _optional_test_target(args.get("target"))
+            timeout = _bounded_int(args.get("timeout_seconds", 60), "timeout_seconds", 1, 120)
+            resolved_profile, argv = self._argv_for_profile(profile, target)
+        except ToolError as exc:
+            return ToolResult(name="test.run", ok=False, error=str(exc))
+
+        details = {
+            "profile": resolved_profile,
+            "target": target or "",
+            "argv": list(argv),
+            "cwd": ".",
+            "timeout_seconds": timeout,
+        }
+        if self.approval_callback is None or self.approval_callback("test.run", details) is not True:
+            return ToolResult(name="test.run", ok=False, error="approval denied")
+
+        try:
+            completed = self.runner(
+                list(argv),
+                cwd=self.root,
+                shell=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=timeout,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            return ToolResult(name="test.run", ok=False, error=f"test command failed: {type(exc).__name__}")
+
+        return ToolResult(
+            name="test.run",
+            ok=completed.returncode == 0,
+            output={
+                "profile": resolved_profile,
+                "argv": list(argv),
+                "exit_code": completed.returncode,
+                "stdout": completed.stdout[:_MAX_OUTPUT_CHARS],
+                "stderr": completed.stderr[:_MAX_OUTPUT_CHARS],
+                "truncated": len(completed.stdout) > _MAX_OUTPUT_CHARS or len(completed.stderr) > _MAX_OUTPUT_CHARS,
+            },
+            error=None if completed.returncode == 0 else "test command returned a non-zero exit code",
+        )
+
+    def _argv_for_profile(self, profile: str, target: str | None) -> tuple[str, tuple[str, ...]]:
+        resolved_profile = self._detect_profile() if profile == "auto" else profile
+        if resolved_profile == "python-unittest":
+            if target:
+                return resolved_profile, (sys.executable, "-B", "-m", "unittest", target)
+            if (self.root / "tests").is_dir():
+                return resolved_profile, (sys.executable, "-B", "-m", "unittest", "discover", "-s", "tests")
+            return resolved_profile, (sys.executable, "-B", "-m", "unittest", "discover")
+        if resolved_profile == "python-pytest":
+            argv = [sys.executable, "-m", "pytest"]
+            if target:
+                argv.append(target)
+            return resolved_profile, tuple(argv)
+        if resolved_profile == "npm-test":
+            npm = shutil.which("npm.cmd") or shutil.which("npm")
+            if not npm:
+                raise ToolError("npm executable was not found")
+            argv = [npm, "test"]
+            if target:
+                argv.extend(("--", target))
+            return resolved_profile, tuple(argv)
+        raise ToolError(f"unsupported test profile '{resolved_profile}'")
+
+    def _detect_profile(self) -> str:
+        package_json = self.root / "package.json"
+        if package_json.exists() and not (self.root / "tests").exists():
+            return "npm-test"
+        if (self.root / "pytest.ini").exists() or (self.root / "conftest.py").exists():
+            return "python-pytest"
+        pyproject = self.root / "pyproject.toml"
+        if pyproject.exists():
+            try:
+                text = pyproject.read_text(encoding="utf-8", errors="replace")[:20_000]
+            except OSError:
+                text = ""
+            if "pytest" in text or "[tool.pytest" in text:
+                return "python-pytest"
+        return "python-unittest"
+
+
 def _bounded_int(value: object, field_name: str, minimum: int, maximum: int) -> int:
     if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
         raise ToolError(f"{field_name} must be an integer from {minimum} to {maximum}")
     return value
+
+
+def _test_profile(value: object) -> str:
+    if not isinstance(value, str) or value.strip() not in TestRunTools._PROFILES:
+        raise ToolError("profile must be one of: auto, python-unittest, python-pytest, npm-test")
+    return value.strip()
+
+
+def _optional_test_target(value: object) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ToolError("target must be a string when provided")
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > 500:
+        raise ToolError("target is too long")
+    return normalized
 
 
 def _normalize_argv(value: object) -> tuple[str, ...]:
@@ -1204,6 +1359,8 @@ __all__ = [
     "ToolExecutor",
     "ToolResult",
     "ToolSpec",
+    "TEST_RUN_TOOL_SPECS",
+    "TestRunTools",
     "WEB_RESEARCH_TOOL_SPECS",
     "WebResearchTools",
 ]

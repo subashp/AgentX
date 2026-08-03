@@ -36,8 +36,9 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertIn("memory_search", names)
         self.assertNotIn("workspace_patch", names)
         self.assertNotIn("shell_exec", names)
+        self.assertNotIn("test_run", names)
 
-    def test_execute_mode_includes_patch_and_shell_tools(self):
+    def test_execute_mode_includes_patch_shell_and_test_tools(self):
         executor = build_private_tool_executor(
             mode="execute",
             workspace_root=self.root,
@@ -50,6 +51,7 @@ class ToolRegistryTests(unittest.TestCase):
         names = set(tool_names(executor))
         self.assertIn("workspace_patch", names)
         self.assertIn("shell_exec", names)
+        self.assertIn("test_run", names)
         self.assertEqual(len(names), len(tool_names(executor)))
 
     def test_memory_mode_exposes_memory_tools_only(self):
