@@ -9,10 +9,9 @@ description = "Provider-neutral command-line gateway for agentic coding"
 license = { file = "LICENSE" }
 readme = "README.md"
 requires-python = ">=3.11"
-dependencies = []
+dependencies = ["prompt_toolkit>=3.0"]
 
 [project.optional-dependencies]
-interactive = ["prompt_toolkit>=3.0"]
 web = ["pypdf>=5"]
 browser = ["playwright>=1.40"]
 

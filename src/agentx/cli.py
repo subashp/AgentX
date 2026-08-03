@@ -700,7 +700,7 @@ def _read_interactive_line(
             completer=NestedCompleter.from_nested_dict(
                 _slash_command_completion_tree(provider_ids)
             ),
-            complete_while_typing=False,
+            complete_while_typing=True,
         )
         return session.prompt(prompt_text) + "\n"
     except EOFError:
