@@ -841,6 +841,7 @@ class CliTests(unittest.TestCase):
         self.assertEqual(0, code)
         self.assertEqual("", stderr.getvalue())
         self.assertEqual("patch README", plan.call_args.args[0])
+        self.assertEqual("execute", plan.call_args.kwargs["run_mode"])
         self.assertTrue(plan.call_args.kwargs["enable_patch_tool"])
         self.assertTrue(plan.call_args.kwargs["enable_shell_tool"])
 

@@ -530,6 +530,7 @@ def _interactive(
                     request_cancellation=request_cancellation,
                     enable_patch_tool=True,
                     enable_shell_tool=True,
+                    run_mode="execute",
                 )
             except KeyboardInterrupt:
                 stdout.write("\nRequest cancelled. Returning to AgentX.\n")
@@ -1000,6 +1001,7 @@ def _plan(
     request_cancellation: RequestCancellation | None = None,
     enable_patch_tool: bool = False,
     enable_shell_tool: bool = False,
+    run_mode: str = "plan",
 ) -> int:
     try:
         if provider == "fake-local":
@@ -1148,7 +1150,7 @@ def _plan(
 
         run = AgentRun(
             prompt=prompt,
-            mode="plan",
+            mode=run_mode,
             provider=run_provider,
             model_tier=model_tier,
             context_paths=context_paths,

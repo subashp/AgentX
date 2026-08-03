@@ -380,6 +380,11 @@ class OpenAICompatibleAdapter:
             run,
             context_map=request.context_map,
             context_root=self.context_root,
+            available_tool_names=(
+                tuple(spec.name for spec in self.tool_executor.specs)
+                if self.tool_executor is not None
+                else ()
+            ),
         )
         transcript_prefix = (
             {
@@ -675,21 +680,22 @@ def _build_agentx_messages(
     *,
     context_map: Mapping[str, object] | None = None,
     context_root: Path | None = None,
+    available_tool_names: Sequence[str] = (),
 ) -> tuple[Mapping[str, str], ...]:
-    system = "\n".join(
-        (
-            "You are running behind AgentX as a private OpenAI-compatible provider adapter.",
-            "Treat this as a plan-safe and execution-safe advisory run.",
-            "Do not claim that files were edited, commands were run, patches were applied, or external systems were changed.",
-            "When web research tools are available, use web_fetch for a user-named website or URL; use web_search only when the user did not name a source.",
-            "Return a concise assistant response that AgentX can store as the run outcome summary.",
-        )
-    )
+    system = _agentx_system_prompt(run.mode)
     lines = [
         f"Mode: {run.mode}",
         f"Requested provider: {run.provider}",
         f"Requested model tier: {run.model_tier or 'auto'}",
     ]
+    normalized_tool_names = tuple(
+        name.strip()
+        for name in available_tool_names
+        if isinstance(name, str) and name.strip()
+    )
+    if run.mode == "execute" and normalized_tool_names:
+        lines.append("Available AgentX tools:")
+        lines.extend(f"- {name}" for name in normalized_tool_names)
     if run.context_paths:
         lines.append("Context paths:")
         lines.extend(f"- {path}" for path in run.context_paths)
@@ -718,6 +724,34 @@ def _build_agentx_messages(
     return (
         {"role": "system", "content": system},
         {"role": "user", "content": "\n".join(lines)},
+    )
+
+
+def _agentx_system_prompt(mode: str) -> str:
+    common = (
+        "You are running behind AgentX as a private OpenAI-compatible provider adapter.",
+        "When web research tools are available, use web_fetch for a user-named website or URL; use web_search only when the user did not name a source.",
+        "Return a concise assistant response that AgentX can store as the run outcome summary.",
+    )
+    if mode == "execute":
+        return "\n".join(
+            common
+            + (
+                "Treat this as a bounded execute-mode coding run.",
+                "You may inspect files with workspace tools, request test commands with shell_exec, and request scoped patches with workspace_patch when those tools are available.",
+                "Every shell command, patch, browser side effect, and internet request is approved by AgentX outside the prompt before it runs.",
+                "Use tool results as ground truth: do not claim a command ran, a patch applied, or tests passed unless a returned tool result confirms it.",
+                "After a failing test, inspect the failure, request a focused patch, and rerun the relevant focused test when possible.",
+                "Stop and summarize when validation passes, approval is denied, safety limits are reached, or the same failure repeats.",
+            )
+        )
+    return "\n".join(
+        common
+        + (
+            "Treat this as a plan-safe advisory run.",
+            "Do not edit files, run mutating commands, apply patches, or modify the workspace.",
+            "Do not claim that files were edited, commands were run, patches were applied, or external systems were changed.",
+        )
     )
 
 

@@ -18,7 +18,7 @@ from agentx.openai_compatible import (
 from agentx.routing import AgentRun
 from agentx.store import RUN_ARTIFACT_FILES, SessionStore
 from agentx.subagents import SubagentManager, SubagentTask, SubagentTools
-from agentx.tools import CompositeToolExecutor, ReadOnlyWorkspaceTools
+from agentx.tools import CompositeToolExecutor, ControlledWorkspaceTools, ReadOnlyWorkspaceTools
 
 
 class PrivateAdapterFixtureTestCase(unittest.TestCase):
@@ -201,6 +201,65 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         user_content = self.server.requests[0]["json"]["messages"][1]["content"]
         self.assertIn("Policy-approved memory:", user_content)
         self.assertIn("compact updates", user_content)
+
+    def test_plan_prompt_keeps_advisory_no_mutation_contract(self):
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            tool_executor=ReadOnlyWorkspaceTools(self.fixture_root),
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Plan a cleanup",
+                    provider="private-openai-compatible",
+                    mode="plan",
+                )
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        payload = self.server.requests[0]["json"]
+        self.assertIn("Treat this as a plan-safe advisory run.", payload["messages"][0]["content"])
+        self.assertIn("Do not edit files", payload["messages"][0]["content"])
+        self.assertNotIn("Available AgentX tools:", payload["messages"][1]["content"])
+        self.assertIn("Mode: plan", payload["messages"][1]["content"])
+
+    def test_execute_prompt_allows_verified_tool_driven_work(self):
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            tool_executor=ControlledWorkspaceTools(
+                self.fixture_root,
+                allowed_paths=("README.md",),
+                approval_callback=lambda operation, details: False,
+            ),
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Add tests and run them",
+                    provider="private-openai-compatible",
+                    mode="execute",
+                )
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        payload = self.server.requests[0]["json"]
+        system_content = payload["messages"][0]["content"]
+        user_content = payload["messages"][1]["content"]
+        self.assertIn("bounded execute-mode coding run", system_content)
+        self.assertIn("request test commands with shell_exec", system_content)
+        self.assertIn("request scoped patches with workspace_patch", system_content)
+        self.assertIn("Use tool results as ground truth", system_content)
+        self.assertNotIn("Do not edit files", system_content)
+        self.assertIn("Mode: execute", user_content)
+        self.assertIn("Available AgentX tools:", user_content)
+        self.assertIn("- shell_exec", user_content)
+        self.assertIn("- workspace_patch", user_content)
 
     def test_auth_header_is_omitted_when_api_key_is_not_supplied(self):
         adapter = OpenAICompatibleAdapter(base_url=self.base_url, model="local-coder")
