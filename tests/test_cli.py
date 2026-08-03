@@ -452,6 +452,57 @@ class CliTests(unittest.TestCase):
         self.assertEqual("", stderr.getvalue())
         self.assertNotIn("unknown provider", stdout.getvalue() + stderr.getvalue())
 
+    def test_interactive_flushes_initial_provider_prompt_before_read(self):
+        class FlushTrackingStringIO(io.StringIO):
+            def __init__(self):
+                super().__init__()
+                self.flush_calls = 0
+
+            def flush(self):
+                self.flush_calls += 1
+                super().flush()
+
+        class PromptReadStdin(io.StringIO):
+            def __init__(self, text: str, tracked_stdout: FlushTrackingStringIO):
+                super().__init__(text)
+                self.tracked_stdout = tracked_stdout
+                self.flush_calls_seen_on_first_read: int | None = None
+
+            def readline(self, *args):
+                if self.flush_calls_seen_on_first_read is None:
+                    self.flush_calls_seen_on_first_read = self.tracked_stdout.flush_calls
+                return super().readline(*args)
+
+        stdout = FlushTrackingStringIO()
+        stdin = PromptReadStdin("/quit\n", stdout)
+        stderr = io.StringIO()
+        settings = Settings(
+            paths=AgentXPaths(
+                root=Path("tests") / ".tmp_cli_interactive_prompt_flush",
+                settings=Path("tests") / ".tmp_cli_interactive_prompt_flush" / "settings.json",
+                sessions=Path("tests") / ".tmp_cli_interactive_prompt_flush" / "sessions",
+                memories=Path("tests") / ".tmp_cli_interactive_prompt_flush" / "memories",
+                auth=Path("tests") / ".tmp_cli_interactive_prompt_flush" / "auth",
+            )
+        )
+        statuses = (
+            ProviderStatus(
+                id="fake-local",
+                display_name="AgentX Fake Local",
+                kind="builtin",
+                enabled=True,
+                reason="available",
+            ),
+        )
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                code = cli.run([], stdout, stderr, stdin)
+
+        self.assertEqual(0, code)
+        self.assertGreaterEqual(stdin.flush_calls_seen_on_first_read or 0, 1)
+
     def test_interactive_provider_option_runs_selected_codex_prompt(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

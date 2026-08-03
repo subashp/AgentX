@@ -412,6 +412,7 @@ def _interactive(
             availability = "available" if status.enabled else f"unavailable: {status.reason}"
             stdout.write(f"  {index}. {status.id} - {status.display_name} ({availability})\n")
         stdout.write("Select provider [auto]: ")
+        stdout.flush()
         choice = stdin.readline().strip()
         if choice.lower() in {"/quit", "/exit", ":q"}:
             return 0
@@ -673,14 +674,17 @@ def _read_interactive_line(
 ) -> str:
     if stdin is not sys.stdin or stdout is not sys.stdout:
         stdout.write(prompt_text)
+        stdout.flush()
         return stdin.readline()
     stdin_isatty = getattr(stdin, "isatty", None)
     stdout_isatty = getattr(stdout, "isatty", None)
     if not callable(stdin_isatty) or not stdin_isatty():
         stdout.write(prompt_text)
+        stdout.flush()
         return stdin.readline()
     if not callable(stdout_isatty) or not stdout_isatty():
         stdout.write(prompt_text)
+        stdout.flush()
         return stdin.readline()
 
     try:
@@ -688,6 +692,7 @@ def _read_interactive_line(
         from prompt_toolkit.completion import NestedCompleter
     except ImportError:
         stdout.write(prompt_text)
+        stdout.flush()
         return stdin.readline()
 
     try:
