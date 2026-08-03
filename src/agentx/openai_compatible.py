@@ -323,6 +323,7 @@ class OpenAICompatibleAdapter:
         client: OpenAICompatibleChatClient | None = None,
         stream: bool = False,
         stream_callback: Callable[[str, str], None] | None = None,
+        tool_event_callback: Callable[[Mapping[str, object]], None] | None = None,
         tool_executor: ToolExecutor | None = None,
         max_tool_rounds: int = 8,
         request_cancellation: RequestCancellation | None = None,
@@ -332,8 +333,11 @@ class OpenAICompatibleAdapter:
             raise AdapterError("stream must be a boolean.")
         if stream_callback is not None and not callable(stream_callback):
             raise AdapterError("stream_callback must be callable or None.")
+        if tool_event_callback is not None and not callable(tool_event_callback):
+            raise AdapterError("tool_event_callback must be callable or None.")
         self.stream = stream
         self.stream_callback = stream_callback
+        self.tool_event_callback = tool_event_callback
         if request_cancellation is not None and not callable(
             getattr(request_cancellation, "request", None)
         ):
@@ -510,6 +514,7 @@ class OpenAICompatibleAdapter:
         usage: Mapping[str, object] | None = None
 
         for _round in range(self.max_tool_rounds):
+            round_number = _round + 1
             response = self._create_chat_completion(
                 conversation,
                 model=model_id,
@@ -545,7 +550,19 @@ class OpenAICompatibleAdapter:
                 name = tool_call["name"]
                 call_id = tool_call["id"]
                 used_tools.append(name)
-                result = _run_tool_call(self.tool_executor, name, tool_call["arguments"])
+                arguments = tool_call["arguments"]
+                self._notify_tool_event(
+                    "requested",
+                    name,
+                    _tool_event_request_details(round_number, arguments),
+                )
+                self._notify_tool_event("started", name, {"round": round_number})
+                result = _run_tool_call(self.tool_executor, name, arguments)
+                self._notify_tool_event(
+                    _tool_result_event_name(result),
+                    name,
+                    _tool_event_result_details(round_number, result),
+                )
                 tool_trace.append(_tool_trace_entry(name, result))
                 conversation.append(
                     {
@@ -622,6 +639,13 @@ class OpenAICompatibleAdapter:
     def _notify_stream(self, kind: str, value: str) -> None:
         if self.stream_callback is not None:
             self.stream_callback(kind, value)
+
+    def _notify_tool_event(self, event: str, name: str, details: Mapping[str, object]) -> None:
+        if self.tool_event_callback is None:
+            return
+        payload = {"event": event, "name": name}
+        payload.update(details)
+        self.tool_event_callback(payload)
 
     def _failure_result(
         self,
@@ -1049,6 +1073,31 @@ def _tool_trace_entry(name: str, result: ToolResult) -> Mapping[str, object]:
     if not result.ok:
         entry["error"] = (result.error or "tool failed")[:500]
     return entry
+
+
+def _tool_event_request_details(round_number: int, arguments: Mapping[str, object]) -> Mapping[str, object]:
+    argument_keys = sorted(str(key) for key in arguments.keys())[:20]
+    return {"round": round_number, "argument_keys": argument_keys}
+
+
+def _tool_event_result_details(round_number: int, result: ToolResult) -> Mapping[str, object]:
+    payload = result.as_json()
+    details: dict[str, object] = {
+        "round": round_number,
+        "ok": result.ok,
+        "result_characters": len(payload),
+    }
+    if not result.ok:
+        details["error"] = (result.error or "tool failed")[:500]
+    return details
+
+
+def _tool_result_event_name(result: ToolResult) -> str:
+    if result.ok:
+        return "completed"
+    if (result.error or "").lower() == "approval denied":
+        return "denied"
+    return "failed"
 
 
 def _extract_assistant_message(response: Mapping[str, object]) -> tuple[str | None, str | None]:

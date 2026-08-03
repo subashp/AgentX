@@ -1002,6 +1002,24 @@ class CliTests(unittest.TestCase):
         self.assertFalse(allowed)
         self.assertIn("Cancelled.", stdout.getvalue())
 
+    def test_cli_tool_event_renderer_reports_progress(self):
+        stdout = io.StringIO()
+        renderer = cli._CliToolEventRenderer(stdout)
+
+        renderer({"event": "requested", "name": "shell_exec", "argument_keys": ["argv", "timeout_seconds"]})
+        renderer({"event": "started", "name": "shell_exec"})
+        renderer({"event": "completed", "name": "shell_exec", "result_characters": 120})
+        renderer({"event": "failed", "name": "workspace_patch", "error": "git apply failed"})
+        renderer({"event": "denied", "name": "web_fetch"})
+
+        rendered = stdout.getvalue()
+        self.assertIn("Tool request: shell_exec", rendered)
+        self.assertIn("Arguments: argv, timeout_seconds", rendered)
+        self.assertIn("Tool running: shell_exec", rendered)
+        self.assertIn("Tool result: shell_exec ok (120 chars)", rendered)
+        self.assertIn("Tool failed: workspace_patch: git apply failed", rendered)
+        self.assertIn("Tool denied: web_fetch", rendered)
+
     @unittest.skipUnless(os.name == "posix", "Escape monitoring uses POSIX terminal APIs")
     def test_interactive_escape_cancels_an_active_request(self):
         master_fd, slave_fd = pty.openpty()
@@ -1726,6 +1744,7 @@ class RecordingPrivateAdapter:
         context_root,
         stream=False,
         stream_callback=None,
+        tool_event_callback=None,
         tool_executor=None,
         request_cancellation=None,
     ):
@@ -1737,6 +1756,7 @@ class RecordingPrivateAdapter:
         self.context_root = context_root
         self.stream = stream
         self.stream_callback = stream_callback
+        self.tool_event_callback = tool_event_callback
         self.tool_executor = tool_executor
         self.request_cancellation = request_cancellation
         self.instances.append(self)

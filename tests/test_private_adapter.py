@@ -418,6 +418,69 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         self.assertIn('"path": "README.md"', second_messages[3]["content"])
         self.assertEqual(40, result.cost["usage"]["total_tokens"])
 
+    def test_tool_loop_emits_bounded_progress_events(self):
+        (self.fixture_root / "README.md").write_text("tool-visible fixture", encoding="utf-8")
+        self.server.response_bodies = [
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": None,
+                            "tool_calls": [
+                                {
+                                    "id": "call-read-1",
+                                    "type": "function",
+                                    "function": {
+                                        "name": "workspace_read",
+                                        "arguments": '{"path":"README.md","max_chars":1000}',
+                                    },
+                                }
+                            ],
+                        },
+                        "finish_reason": "tool_calls",
+                    }
+                ]
+            },
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Read completed.",
+                        }
+                    }
+                ]
+            },
+        ]
+        events = []
+        adapter = OpenAICompatibleAdapter(
+            base_url=self.base_url,
+            model="local-coder",
+            tool_executor=ReadOnlyWorkspaceTools(self.fixture_root),
+            tool_event_callback=events.append,
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Read README",
+                    provider="private-openai-compatible",
+                )
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        self.assertEqual(
+            ["requested", "started", "completed"],
+            [event["event"] for event in events],
+        )
+        self.assertEqual("workspace_read", events[0]["name"])
+        self.assertEqual(["max_chars", "path"], events[0]["argument_keys"])
+        self.assertEqual(1, events[0]["round"])
+        self.assertTrue(events[2]["ok"])
+        self.assertGreater(events[2]["result_characters"], 0)
+
     def test_tool_loop_executes_raw_qwen_tool_call_and_returns_follow_up(self):
         (self.fixture_root / "README.md").write_text("tool-visible fixture", encoding="utf-8")
         self.server.response_bodies = [

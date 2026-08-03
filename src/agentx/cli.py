@@ -1144,6 +1144,11 @@ def _plan(
                     if not json_output
                     else None
                 ),
+                tool_event_callback=(
+                    _CliToolEventRenderer(stdout)
+                    if interactive_output and not json_output
+                    else None
+                ),
                 tool_executor=tool_executor,
                 request_cancellation=request_cancellation,
             )
@@ -1774,6 +1779,31 @@ class _CliStreamRenderer:
                 self.stdout.write("\n")
                 self.stdout.flush()
                 self.section = None
+        self.stdout.flush()
+
+
+class _CliToolEventRenderer:
+    def __init__(self, stdout: TextIO) -> None:
+        self.stdout = stdout
+
+    def __call__(self, event: Mapping[str, object]) -> None:
+        kind = str(event.get("event") or "")
+        name = str(event.get("name") or "tool")
+        if kind == "requested":
+            self.stdout.write(f"\nTool request: {name}\n")
+            argument_keys = event.get("argument_keys")
+            if isinstance(argument_keys, Sequence) and not isinstance(argument_keys, (str, bytes)) and argument_keys:
+                self.stdout.write("Arguments: " + ", ".join(str(key) for key in argument_keys) + "\n")
+        elif kind == "started":
+            self.stdout.write(f"Tool running: {name}\n")
+        elif kind == "completed":
+            self.stdout.write(
+                f"Tool result: {name} ok ({event.get('result_characters', 0)} chars)\n"
+            )
+        elif kind == "denied":
+            self.stdout.write(f"Tool denied: {name}\n")
+        elif kind == "failed":
+            self.stdout.write(f"Tool failed: {name}: {event.get('error', 'tool failed')}\n")
         self.stdout.flush()
 
 
