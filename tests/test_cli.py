@@ -926,7 +926,7 @@ class CliTests(unittest.TestCase):
         self.assertIn("memory_search", output)
         self.assertIn("Use /execute", output)
 
-    def test_interactive_web_approval_shows_request_and_requires_yes(self):
+    def test_interactive_approval_shows_web_request_and_requires_yes(self):
         class FlushTrackingStringIO(io.StringIO):
             def __init__(self):
                 super().__init__()
@@ -937,7 +937,7 @@ class CliTests(unittest.TestCase):
                 super().flush()
 
         stdout = FlushTrackingStringIO()
-        approval = cli._InteractiveWebApproval(io.StringIO("yes\n\n"), stdout)
+        approval = cli._InteractiveApproval(io.StringIO("yes\n\n"), stdout)
 
         allowed = approval(
             "web.search",
@@ -951,16 +951,48 @@ class CliTests(unittest.TestCase):
         self.assertTrue(allowed)
         self.assertFalse(denied)
         rendered = stdout.getvalue()
-        self.assertIn("Internet access requested", rendered)
+        self.assertIn("Internet search requested", rendered)
+        self.assertIn("Internet fetch requested", rendered)
         self.assertIn("current Qwen release", rendered)
         self.assertIn("https://example.com/release", rendered)
         self.assertIn("Approved.", rendered)
         self.assertIn("Denied.", rendered)
         self.assertEqual(2, stdout.flush_calls)
 
-    def test_interactive_web_approval_treats_escape_as_cancelled(self):
+    def test_interactive_approval_shows_shell_and_patch_requests(self):
         stdout = io.StringIO()
-        approval = cli._InteractiveWebApproval(io.StringIO("\x1b"), stdout)
+        approval = cli._InteractiveApproval(io.StringIO("yes\nyes\n"), stdout)
+
+        shell_allowed = approval(
+            "shell.exec",
+            {
+                "argv": ["py", "-B", "-m", "unittest", "tests.test_cli"],
+                "cwd": ".",
+                "timeout_seconds": 120,
+            },
+        )
+        patch_allowed = approval(
+            "workspace.patch",
+            {
+                "paths": ["src/agentx/cli.py", "tests/test_cli.py"],
+                "patch": "--- a/src/agentx/cli.py\n+++ b/src/agentx/cli.py\n",
+            },
+        )
+
+        self.assertTrue(shell_allowed)
+        self.assertTrue(patch_allowed)
+        rendered = stdout.getvalue()
+        self.assertIn("Shell command requested", rendered)
+        self.assertIn("Argv:", rendered)
+        self.assertIn("py", rendered)
+        self.assertIn("Working directory: .", rendered)
+        self.assertIn("Workspace patch requested", rendered)
+        self.assertIn("src/agentx/cli.py", rendered)
+        self.assertIn("Patch preview:", rendered)
+
+    def test_interactive_approval_treats_escape_as_cancelled(self):
+        stdout = io.StringIO()
+        approval = cli._InteractiveApproval(io.StringIO("\x1b"), stdout)
 
         allowed = approval(
             "web.search",
@@ -994,11 +1026,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("Request cancelled. Returning to AgentX.", stdout.getvalue())
 
     @unittest.skipUnless(os.name == "posix", "Escape monitoring uses POSIX terminal APIs")
-    def test_interactive_web_approval_accepts_escape_without_enter(self):
+    def test_interactive_approval_accepts_escape_without_enter(self):
         master_fd, slave_fd = pty.openpty()
         stdin = os.fdopen(slave_fd, "r", encoding="utf-8", closefd=False)
         stdout = io.StringIO()
-        approval = cli._InteractiveWebApproval(stdin, stdout)
+        approval = cli._InteractiveApproval(stdin, stdout)
         result = []
 
         def ask_for_approval():

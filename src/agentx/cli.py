@@ -441,7 +441,7 @@ def _interactive(
             return 2
 
     context_paths: tuple[str, ...] = ()
-    web_approval = _InteractiveWebApproval(stdin, stdout)
+    web_approval = _InteractiveApproval(stdin, stdout)
     request_cancellation = _InteractiveRequestCancellation(stdin, stdout)
 
     while True:
@@ -1673,26 +1673,65 @@ class _InteractiveRequestCancellation:
                 pass
 
 
-class _InteractiveWebApproval:
-    """Ask before a model sends a query or URL to a public web service."""
+class _InteractiveApproval:
+    """Ask before a model-requested operation with side effects or external access."""
 
     def __init__(self, stdin: TextIO, stdout: TextIO) -> None:
         self.stdin = stdin
         self.stdout = stdout
 
     def __call__(self, operation: str, details: Mapping[str, object]) -> bool:
-        self.stdout.write("\nInternet access requested by the model.\n")
         if operation == "web.search":
+            self.stdout.write("\nInternet search requested by the model.\n")
             self.stdout.write(f"Search provider: {details.get('source', 'web search')}\n")
             reason = details.get("reason")
             if isinstance(reason, str) and reason:
                 self.stdout.write(f"Reason: {reason}\n")
             self.stdout.write(f"Query: {details.get('query', '')}\n")
             self.stdout.write(f"Maximum results: {details.get('max_results', '')}\n")
-        elif operation == "web.fetch":
+        elif operation in {"web.fetch", "web.fetch_document"}:
+            self.stdout.write("\nInternet fetch requested by the model.\n")
             self.stdout.write(f"Fetch URL: {details.get('url', '')}\n")
             self.stdout.write(f"Maximum returned text: {details.get('max_chars', '')} characters\n")
+            if operation == "web.fetch_document":
+                self.stdout.write(f"Maximum pages: {details.get('max_pages', '')}\n")
+        elif operation == "workspace.patch":
+            self.stdout.write("\nWorkspace patch requested by the model.\n")
+            paths = details.get("paths", ())
+            if isinstance(paths, Sequence) and not isinstance(paths, (str, bytes)):
+                self.stdout.write("Paths:\n")
+                for path in paths:
+                    self.stdout.write(f"  {path}\n")
+            patch = details.get("patch")
+            if isinstance(patch, str):
+                preview = patch[:2_000]
+                self.stdout.write("Patch preview:\n")
+                self.stdout.write(preview)
+                if len(patch) > len(preview):
+                    self.stdout.write("\n... truncated ...")
+                if not preview.endswith("\n"):
+                    self.stdout.write("\n")
+        elif operation == "shell.exec":
+            self.stdout.write("\nShell command requested by the model.\n")
+            argv = details.get("argv", ())
+            if isinstance(argv, Sequence) and not isinstance(argv, (str, bytes)):
+                self.stdout.write("Argv:\n")
+                for item in argv:
+                    self.stdout.write(f"  {item}\n")
+            self.stdout.write(f"Working directory: {details.get('cwd', '.')}\n")
+            self.stdout.write(f"Timeout: {details.get('timeout_seconds', '')} seconds\n")
+        elif operation.startswith("browser."):
+            self.stdout.write("\nBrowser action requested by the model.\n")
+            self.stdout.write(f"Operation: {operation}\n")
+            for key, value in details.items():
+                self.stdout.write(f"{key}: {value}\n")
+        elif operation.startswith("memory."):
+            self.stdout.write("\nMemory operation requested by the model.\n")
+            self.stdout.write(f"Operation: {operation}\n")
+            for key, value in details.items():
+                self.stdout.write(f"{key}: {value}\n")
         else:
+            self.stdout.write("\nAgentX tool operation requested by the model.\n")
             self.stdout.write(f"Operation: {operation}\n")
         self.stdout.write("Allow this request? [y/N]: ")
         self.stdout.flush()
