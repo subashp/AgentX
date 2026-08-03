@@ -844,6 +844,45 @@ class CliTests(unittest.TestCase):
         self.assertTrue(plan.call_args.kwargs["enable_patch_tool"])
         self.assertTrue(plan.call_args.kwargs["enable_shell_tool"])
 
+    def test_interactive_execute_without_task_fails_fast(self):
+        stdout = io.StringIO()
+        stderr = io.StringIO()
+        root = Path("tests") / ".tmp_cli_interactive_execute_empty"
+        settings = Settings(
+            paths=AgentXPaths(
+                root=root,
+                settings=root / "settings.json",
+                sessions=root / "sessions",
+                memories=root / "memories",
+                auth=root / "auth",
+            ),
+            private_provider="private-openai-compatible",
+        )
+        statuses = (
+            ProviderStatus(
+                "private-openai-compatible",
+                "Private",
+                "openai_compatible",
+                True,
+                "available",
+            ),
+        )
+
+        with mock.patch("agentx.cli.load_settings", return_value=settings):
+            with mock.patch("agentx.cli.ProviderRegistry") as registry:
+                registry.return_value.list_statuses.return_value = statuses
+                with mock.patch("agentx.cli._plan") as plan:
+                    code = cli.run(
+                        ["interactive", "--provider", "private-openai-compatible"],
+                        stdout,
+                        stderr,
+                        io.StringIO("/execute\n/quit\n"),
+                    )
+
+        self.assertEqual(0, code)
+        self.assertIn("agentx: /execute requires a task prompt.", stderr.getvalue())
+        plan.assert_not_called()
+
     def test_interactive_tools_lists_private_provider_tools(self):
         stdout = io.StringIO()
         stderr = io.StringIO()

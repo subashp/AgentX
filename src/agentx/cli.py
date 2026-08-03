@@ -497,6 +497,9 @@ def _interactive(
         if command == "/tools":
             _interactive_tools(selected_provider, settings, context_paths, web_approval, stdout, stderr)
             continue
+        if command == "/execute":
+            stderr.write("agentx: /execute requires a task prompt.\n")
+            continue
         if command.startswith("/execute "):
             execute_prompt = prompt.split(maxsplit=1)[1].strip()
             if not execute_prompt:
