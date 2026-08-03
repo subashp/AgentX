@@ -94,43 +94,36 @@ The detailed host, model, and troubleshooting reference is in
 AgentX is provider-neutral and privacy-first: it limits what a model can see
 before a request leaves the CLI. The private Qwen provider has bounded,
 read-only workspace tools for listing files, reading files, literal search,
-Git status, and scoped diffs.
+Git status, scoped diffs, memory, web research, browser automation, and
+bounded sub-agents. Slash commands complete in the installed CLI.
 
-Select the files or directories the model may inspect with `/context`:
+Common interactive commands:
 
 ```text
-agentx[private-openai-compatible]> /context README.md src/agentx
-agentx[private-openai-compatible]> review the selected code and suggest a refactor
+/providers                  list provider availability
+/provider codex|claude|kiro|private-openai-compatible|auto
+/context README.md src/agentx
+/memory search qwen
+/memory remember --class private "prefer local Qwen for confidential code"
+/tools                      show model-callable tools for the selected provider
+/execute <task>             allow approval-gated patch/shell tools for this task
+/quit
 ```
 
-The private provider can also call `subagent_create`, `subagent_list`, and
-`subagent_get`. A parent can create up to ten isolated children; each child has
-explicit context, its own artifacts, and cannot create grandchildren. This is
-useful for splitting a repository review into independent areas.
+In normal private-provider chat, tools are read-only unless a user explicitly
+uses `/execute <task>`. Patch and shell tools are approval-gated and scoped to
+the workspace. The model can request `subagent_create`, `subagent_list`, and
+`subagent_get`; a parent can create up to ten isolated children, and children
+cannot create grandchildren.
 
-AgentX uses standard OpenAI `tool_calls` when an endpoint supplies them. For
-Qwen/vLLM combinations that emit complete raw
-`<tool_call>{...}</tool_call>` blocks instead, it safely normalizes those
-blocks, runs the approved read-only tool, and continues the same tool loop.
-Malformed or mixed prose/tool output is rejected rather than executed.
-
-Interactive private-model sessions can also research public information with
-`web_search` and `web_fetch`. AgentX displays the exact query or URL and asks
-for confirmation before every internet request. Search results are limited to
-five compact DuckDuckGo entries; if DuckDuckGo serves an automated-request
-challenge, AgentX asks again before using Brave Search as a fallback. Fetched
-pages are converted to plain text and limited to 6,000 characters so research
-does not crowd out the 32K model context. A named website or URL uses direct
-fetching; an unspecified source uses search. Fetches accept public HTTPS pages
-only and reject credentials, non-default ports, localhost, and private-network
-addresses. Non-interactive plans do not expose web tools, preventing unattended
-network access.
-
-The same shared web layer also exposes `web_fetch_document` for bounded HTML,
-JSON, text, Markdown, and optional PDF extraction. Results include normalized
-citations and use a small approval-aware local cache. Browser interaction is
-optional and uses Playwright tools such as `browser_open`, `browser_text`,
-`browser_click`, `browser_fill`, and `browser_screenshot`.
+AgentX supports both standard OpenAI `tool_calls` and Qwen/vLLM raw
+`<tool_call>{...}</tool_call>` blocks. Malformed or mixed prose/tool output is
+rejected. Interactive private-model sessions can ask for `web_search`,
+`web_fetch`, `web_fetch_document`, and optional Playwright browser tools
+(`browser_open`, `browser_text`, `browser_click`, `browser_fill`,
+`browser_screenshot`). AgentX asks before every internet request or browser
+side effect, bounds results, blocks private-network fetches, records citations,
+and keeps non-interactive plans network-free.
 
 Install optional capabilities when needed:
 
@@ -139,10 +132,9 @@ python -m pip install -e ".[web,browser]"
 python -m playwright install chromium
 ```
 
-Use `/providers`, `/provider`, `/context`, `/help`, and `/quit` in the
-interactive session. Press `Esc` to cancel an active private-model request or
-an internet-approval prompt and return to the CLI. Run `agentx providers list`
-to see which optional local providers are available.
+Press `Esc` to cancel an active private-model request or an internet-approval
+prompt. Run `agentx providers list` to inspect optional local providers outside
+the interactive session.
 
 ### Use the API from another local program
 
@@ -228,8 +220,9 @@ agentx plan --provider private-openai-compatible --context README.md \
 agentx --json providers list
 ```
 
-`fake-local` is a deterministic offline provider for testing. Live execute/apply
-mode is not enabled; AgentX currently keeps live provider workflows read-only.
+`fake-local` is a deterministic offline provider for testing. Non-interactive
+live execute/apply mode is not enabled; interactive `/execute <task>` is the
+approval-gated path for private-provider patch and shell tools.
 
 ### Models and operations
 
@@ -273,10 +266,11 @@ Install it from a full checkout with:
 python -m pip install -e third_party/AgentMemory
 ```
 
-When an AgentMemory SQLite database exists at the AgentX memory state path,
-AgentX can translate those records into its existing provider-visible context
-policy. `generic` maps to public memory, `team` maps to internal memory, and
-`private` maps to secret/local-only memory.
+The CLI exposes memory through `/memory ...` commands and model-callable memory
+tools. `generic` memory may be sent to public providers, `team` depends on user
+policy, and `private` is local-only. The Halo Web UI currently keeps a separate
+gateway-local chat memory; shared AgentMemory-backed Web UI memory is not yet
+implemented.
 
 ### Develop AgentX
 
