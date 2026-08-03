@@ -816,7 +816,7 @@ def _interactive_tools(
         return
     stdout.write("Available AgentX tools:\n")
     stdout.writelines(f"  {name}\n" for name in tool_names(executor))
-    stdout.write("Use /execute <task> to enable approval-gated workspace_patch and shell_exec.\n")
+    stdout.write("Use /execute <task> to enable approval-gated workspace_patch, test_run, and shell_exec.\n")
 
 
 def _route(

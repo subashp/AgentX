@@ -106,15 +106,15 @@ Common interactive commands:
 /memory search qwen
 /memory remember --class private "prefer local Qwen for confidential code"
 /tools                      show model-callable tools for the selected provider
-/execute <task>             allow approval-gated patch/shell tools for this task
+/execute <task>             allow bounded patch/test/shell tools for this task
 /quit
 ```
 
-In normal private-provider chat, tools are read-only unless a user explicitly
-uses `/execute <task>`. Patch and shell tools are approval-gated and scoped to
-the workspace. The model can request `subagent_create`, `subagent_list`, and
-`subagent_get`; a parent can create up to ten isolated children, and children
-cannot create grandchildren.
+Normal private-provider chat is read-only. `/execute <task>` adds approved
+`workspace_patch`, `test_run`, and `shell_exec`, shows progress, and records
+limits plus stop reason. Git staging/commit tools are explicit and never push.
+The model can request up to ten read-only sub-agents; children cannot edit,
+shell out, commit, or create grandchildren.
 
 AgentX supports both standard OpenAI `tool_calls` and Qwen/vLLM raw
 `<tool_call>{...}</tool_call>` blocks. Malformed or mixed prose/tool output is
@@ -221,8 +221,8 @@ agentx --json providers list
 ```
 
 `fake-local` is a deterministic offline provider for testing. Non-interactive
-live execute/apply mode is not enabled; interactive `/execute <task>` is the
-approval-gated path for private-provider patch and shell tools.
+live execute/apply mode is not enabled; use interactive `/execute <task>` for
+approved private-provider patch, test and shell tools.
 
 ### Models and operations
 
