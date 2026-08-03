@@ -10,8 +10,22 @@ from agentx.tools import (
     GitCommitTools,
     ReadOnlyWorkspaceTools,
     TestRunTools,
+    ToolResult,
     WebResearchTools,
 )
+
+
+class ToolResultTests(unittest.TestCase):
+    def test_failed_result_preserves_bounded_output_for_model_repair_loop(self):
+        result = ToolResult(
+            name="test.run",
+            ok=False,
+            error="test command returned a non-zero exit code",
+            output={"exit_code": 1, "stdout": "AssertionError"},
+        ).as_dict()
+
+        self.assertEqual("test command returned a non-zero exit code", result["error"])
+        self.assertEqual({"exit_code": 1, "stdout": "AssertionError"}, result["output"])
 
 
 class ReadOnlyWorkspaceToolsTests(unittest.TestCase):

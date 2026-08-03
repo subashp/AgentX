@@ -102,6 +102,8 @@ class ToolResult:
             result["output"] = self.output
         else:
             result["error"] = self.error or "tool failed"
+            if self.output is not None:
+                result["output"] = self.output
         return result
 
     def as_json(self) -> str:

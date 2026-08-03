@@ -1,5 +1,6 @@
 import json
 import shutil
+import subprocess
 import threading
 import unittest
 import urllib.error
@@ -7,6 +8,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from agentx.adapters import AdapterError, AdapterRequest, execute_adapter_run
+from agentx.autonomy import AutonomousWorkController
 from agentx.config import AgentXPaths
 from agentx.cli import _PrivateSubagentRunner
 from agentx.memory import AgentMemoryTools, call_memory_tool
@@ -18,7 +20,7 @@ from agentx.openai_compatible import (
 from agentx.routing import AgentRun
 from agentx.store import RUN_ARTIFACT_FILES, SessionStore
 from agentx.subagents import SubagentManager, SubagentTask, SubagentTools
-from agentx.tools import CompositeToolExecutor, ControlledWorkspaceTools, ReadOnlyWorkspaceTools
+from agentx.tools import CompositeToolExecutor, ControlledWorkspaceTools, ReadOnlyWorkspaceTools, TestRunTools
 
 
 class PrivateAdapterFixtureTestCase(unittest.TestCase):
@@ -711,6 +713,130 @@ class OpenAICompatibleAdapterTests(PrivateAdapterFixtureTestCase):
         child_message = self.server.requests[1]["json"]["messages"][3]["content"]
         self.assertIn("Child completed: Inspect README", child_message)
 
+    def test_autonomous_execute_fixture_inspects_tests_patches_and_verifies(self):
+        if shutil.which("git") is None:
+            self.skipTest("git executable is required for workspace_patch")
+        project = self.fixture_root / "autonomous-project"
+        (project / "tests").mkdir(parents=True)
+        subprocess.run(
+            ["git", "init", "--quiet"],
+            cwd=project,
+            capture_output=True,
+            text=True,
+            timeout=15,
+            check=True,
+        )
+        (project / "app.py").write_text("def add(a, b):\n    return a - b\n", encoding="utf-8")
+        (project / "tests" / "__init__.py").write_text("", encoding="utf-8")
+        (project / "tests" / "test_app.py").write_text(
+            (
+                "import unittest\n"
+                "\n"
+                "from app import add\n"
+                "\n"
+                "\n"
+                "class AddTests(unittest.TestCase):\n"
+                "    def test_adds_numbers(self):\n"
+                "        self.assertEqual(5, add(2, 3))\n"
+                "\n"
+                "\n"
+                "if __name__ == '__main__':\n"
+                "    unittest.main()\n"
+            ),
+            encoding="utf-8",
+        )
+        patch = (
+            "diff --git a/app.py b/app.py\n"
+            "--- a/app.py\n"
+            "+++ b/app.py\n"
+            "@@ -1,2 +1,2 @@\n"
+            " def add(a, b):\n"
+            "-    return a - b\n"
+            "+    return a + b\n"
+        )
+        self.server.response_bodies = [
+            _tool_call_response("call-read-1", "workspace_read", {"path": "app.py", "max_chars": 1000}),
+            _tool_call_response(
+                "call-test-1",
+                "test_run",
+                {"profile": "python-unittest", "target": "tests.test_app", "timeout_seconds": 30},
+            ),
+            _tool_call_response("call-patch-1", "workspace_patch", {"patch": patch}),
+            _tool_call_response(
+                "call-test-2",
+                "test_run",
+                {"profile": "python-unittest", "target": "tests.test_app", "timeout_seconds": 30},
+            ),
+            {
+                "choices": [
+                    {
+                        "message": {
+                            "role": "assistant",
+                            "content": "Fixed app.add and verified tests pass.",
+                        }
+                    }
+                ]
+            },
+        ]
+        approvals = []
+        controller = AutonomousWorkController()
+        tools = controller.wrap_tool_executor(
+            CompositeToolExecutor(
+                ControlledWorkspaceTools(
+                    project,
+                    allowed_paths=("app.py", "tests/test_app.py"),
+                    approval_callback=lambda operation, details: approvals.append((operation, details)) or True,
+                ),
+                TestRunTools(
+                    project,
+                    approval_callback=lambda operation, details: approvals.append((operation, details)) or True,
+                ),
+            )
+        )
+        adapter = controller.wrap_adapter(
+            OpenAICompatibleAdapter(
+                base_url=self.base_url,
+                model="local-coder",
+                tool_executor=tools,
+                tool_event_callback=controller.tool_event_callback(),
+            )
+        )
+
+        result = adapter.execute(
+            AdapterRequest(
+                run=AgentRun(
+                    prompt="Fix app.add and verify tests.",
+                    provider="private-openai-compatible",
+                    mode="execute",
+                )
+            )
+        )
+
+        self.assertEqual("success", result.status)
+        self.assertEqual("Fixed app.add and verified tests pass.", result.outcome["summary"])
+        self.assertEqual("def add(a, b):\n    return a + b\n", (project / "app.py").read_text(encoding="utf-8"))
+        self.assertEqual(
+            ["workspace_read", "test_run", "workspace_patch", "test_run"],
+            result.outcome["tools_used"],
+        )
+        self.assertEqual([True, False, True, True], [entry["ok"] for entry in result.outcome["tool_trace"]])
+        autonomous = result.outcome["autonomous"]
+        self.assertEqual("validation_passed", autonomous["stop_reason"])
+        self.assertEqual(4, autonomous["iterations"])
+        self.assertEqual(4, autonomous["tool_calls"])
+        self.assertEqual(2, autonomous["shell_calls"])
+        self.assertEqual(1, autonomous["patch_attempts"])
+        self.assertEqual(["app.py"], autonomous["changed_paths"])
+        self.assertEqual(0, autonomous["last_test"]["exit_code"])
+        self.assertEqual(["test.run", "workspace.patch", "test.run"], [item[0] for item in approvals])
+        self.assertEqual(5, len(self.server.requests))
+        failing_tool_message = self.server.requests[2]["json"]["messages"][5]["content"]
+        self.assertIn('"ok": false', failing_tool_message)
+        self.assertIn('"exit_code": 1', failing_tool_message)
+        passing_tool_message = self.server.requests[4]["json"]["messages"][9]["content"]
+        self.assertIn('"ok": true', passing_tool_message)
+        self.assertIn('"exit_code": 0', passing_tool_message)
+
     def test_private_subagent_runner_writes_isolated_child_artifacts(self):
         context_root = self.fixture_root / "child-workspace"
         context_root.mkdir()
@@ -948,6 +1074,30 @@ def _read_artifacts(root: Path) -> dict[str, str]:
     return {
         name: (root / name).read_text(encoding="utf-8")
         for name in RUN_ARTIFACT_FILES
+    }
+
+
+def _tool_call_response(call_id: str, name: str, arguments: dict[str, object]) -> dict[str, object]:
+    return {
+        "choices": [
+            {
+                "message": {
+                    "role": "assistant",
+                    "content": None,
+                    "tool_calls": [
+                        {
+                            "id": call_id,
+                            "type": "function",
+                            "function": {
+                                "name": name,
+                                "arguments": json.dumps(arguments),
+                            },
+                        }
+                    ],
+                },
+                "finish_reason": "tool_calls",
+            }
+        ]
     }
 
 
