@@ -68,6 +68,34 @@ class ToolRegistryTests(unittest.TestCase):
         self.assertNotIn("workspace_tree", names)
         self.assertNotIn("workspace_patch", names)
 
+    def test_commit_mode_includes_read_only_and_git_commit_tools_only_when_approved(self):
+        without_approval = build_private_tool_executor(
+            mode="commit",
+            workspace_root=self.root,
+            context_paths=("README.md",),
+            paths=self.paths,
+            user_prompt="commit changes",
+        )
+        with_approval = build_private_tool_executor(
+            mode="commit",
+            workspace_root=self.root,
+            context_paths=("README.md",),
+            paths=self.paths,
+            user_prompt="commit changes",
+            approval_callback=lambda operation, details: False,
+        )
+
+        names_without_approval = set(tool_names(without_approval))
+        self.assertIn("workspace_read", names_without_approval)
+        self.assertNotIn("git_add", names_without_approval)
+        self.assertNotIn("git_commit", names_without_approval)
+        names_with_approval = set(tool_names(with_approval))
+        self.assertIn("workspace_read", names_with_approval)
+        self.assertIn("git_add", names_with_approval)
+        self.assertIn("git_commit", names_with_approval)
+        self.assertNotIn("workspace_patch", names_with_approval)
+        self.assertNotIn("shell_exec", names_with_approval)
+
 
 if __name__ == "__main__":
     unittest.main()

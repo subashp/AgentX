@@ -522,13 +522,7 @@ def _extract_patch_paths(patch_text: str) -> tuple[tuple[str, ...], tuple[Worksp
 def _patch_format_events(patch_text: str, paths: Sequence[str]) -> tuple[WorkspaceEvent, ...]:
     stripped = patch_text.strip()
     if not stripped:
-        return (
-            WorkspaceEvent(
-                code="patch_empty",
-                severity="error",
-                message="Patch text is empty.",
-            ),
-        )
+        return ()
     if not paths:
         return (
             WorkspaceEvent(

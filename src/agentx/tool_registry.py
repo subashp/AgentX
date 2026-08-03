@@ -10,6 +10,7 @@ from .tools import (
     ApprovalCallback,
     CompositeToolExecutor,
     ControlledWorkspaceTools,
+    GitCommitTools,
     ReadOnlyWorkspaceTools,
     TestRunTools,
     ToolError,
@@ -18,7 +19,7 @@ from .tools import (
 from .web import WebAccessService
 
 
-VALID_TOOL_MODES = frozenset({"plan", "execute", "memory"})
+VALID_TOOL_MODES = frozenset({"plan", "execute", "memory", "commit"})
 
 
 def build_private_tool_executor(
@@ -34,7 +35,7 @@ def build_private_tool_executor(
 ) -> CompositeToolExecutor:
     normalized_mode = _normalize_mode(mode)
     executors: list[ToolExecutor] = []
-    if normalized_mode in {"plan", "execute"}:
+    if normalized_mode in {"plan", "execute", "commit"}:
         if normalized_mode == "execute":
             executors.append(
                 ControlledWorkspaceTools(
@@ -53,6 +54,13 @@ def build_private_tool_executor(
             )
         else:
             executors.append(ReadOnlyWorkspaceTools(workspace_root, allowed_paths=context_paths))
+        if normalized_mode == "commit":
+            executors.append(
+                GitCommitTools(
+                    workspace_root,
+                    approval_callback=approval_callback,
+                )
+            )
     executors.append(AgentMemoryTools(paths, user_prompt=user_prompt, approval_callback=approval_callback))
     if normalized_mode in {"plan", "execute"} and approval_callback is not None:
         executors.append(WebAccessService(approval_callback=approval_callback))

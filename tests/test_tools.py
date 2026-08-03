@@ -5,7 +5,13 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
-from agentx.tools import ControlledWorkspaceTools, ReadOnlyWorkspaceTools, TestRunTools, WebResearchTools
+from agentx.tools import (
+    ControlledWorkspaceTools,
+    GitCommitTools,
+    ReadOnlyWorkspaceTools,
+    TestRunTools,
+    WebResearchTools,
+)
 
 
 class ReadOnlyWorkspaceToolsTests(unittest.TestCase):
@@ -489,6 +495,81 @@ class TestRunToolsTests(unittest.TestCase):
         self.assertFalse(runner.call_args.kwargs["shell"])
         self.assertEqual("npm-test", calls[0][1]["profile"])
         self.assertEqual("test command returned a non-zero exit code", result.error)
+
+
+class GitCommitToolsTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path("tests") / ".tmp_git_commit_tools"
+        shutil.rmtree(self.root, ignore_errors=True)
+        self.root.mkdir(parents=True)
+
+    def tearDown(self):
+        shutil.rmtree(self.root, ignore_errors=True)
+
+    def _approval(self, decision):
+        calls = []
+
+        def approve(operation, details):
+            calls.append((operation, details))
+            return decision
+
+        return approve, calls
+
+    def test_tools_are_hidden_without_approval_callback(self):
+        tools = GitCommitTools(self.root)
+
+        self.assertEqual((), tools.specs)
+
+    def test_git_add_denial_does_not_invoke_runner(self):
+        approve, calls = self._approval(False)
+        runner = mock.Mock()
+        tools = GitCommitTools(self.root, approval_callback=approve, runner=runner)
+
+        result = tools.call("git_add", {"paths": ["src/agentx/cli.py"]})
+
+        self.assertFalse(result.ok)
+        self.assertEqual("approval denied", result.error)
+        self.assertEqual("git.add", calls[0][0])
+        self.assertEqual(["src/agentx/cli.py"], calls[0][1]["paths"])
+        runner.assert_not_called()
+
+    def test_git_add_uses_argv_without_shell(self):
+        approve, calls = self._approval(True)
+        completed = mock.Mock(returncode=0, stdout="", stderr="")
+        runner = mock.Mock(return_value=completed)
+        tools = GitCommitTools(self.root, approval_callback=approve, runner=runner)
+
+        result = tools.call("git.add", {"paths": ["src\\agentx\\cli.py", "tests/test_cli.py"]})
+
+        self.assertTrue(result.ok)
+        self.assertEqual(["git", "add", "--", "src/agentx/cli.py", "tests/test_cli.py"], runner.call_args.args[0])
+        self.assertFalse(runner.call_args.kwargs["shell"])
+        self.assertEqual(self.root.resolve(), runner.call_args.kwargs["cwd"])
+        self.assertEqual(["git", "add", "--", "src/agentx/cli.py", "tests/test_cli.py"], calls[0][1]["argv"])
+
+    def test_git_commit_requires_bounded_message(self):
+        approve, _calls = self._approval(True)
+        tools = GitCommitTools(self.root, approval_callback=approve, runner=mock.Mock())
+
+        result = tools.call("git_commit", {"message": "   "})
+
+        self.assertFalse(result.ok)
+        self.assertIn("non-empty", result.error)
+
+    def test_git_commit_uses_argv_and_never_pushes(self):
+        approve, calls = self._approval(True)
+        completed = mock.Mock(returncode=0, stdout="[main abc] msg\n", stderr="")
+        runner = mock.Mock(return_value=completed)
+        tools = GitCommitTools(self.root, approval_callback=approve, runner=runner)
+
+        result = tools.call("git_commit", {"message": "  Fix tests  "})
+
+        self.assertTrue(result.ok)
+        self.assertEqual(["git", "commit", "-m", "Fix tests"], runner.call_args.args[0])
+        self.assertNotIn("push", runner.call_args.args[0])
+        self.assertFalse(runner.call_args.kwargs["shell"])
+        self.assertEqual("git.commit", calls[0][0])
+        self.assertEqual("Fix tests", calls[0][1]["message"])
 
 
 if __name__ == "__main__":

@@ -233,6 +233,32 @@ TEST_RUN_TOOL_SPECS: tuple[ToolSpec, ...] = (
 )
 
 
+GIT_COMMIT_TOOL_SPECS: tuple[ToolSpec, ...] = (
+    ToolSpec(
+        "git_add",
+        "Stage explicitly approved relative workspace paths for a local Git commit.",
+        {
+            "type": "object",
+            "required": ["paths"],
+            "properties": {
+                "paths": {"type": "array", "items": {"type": "string"}, "minItems": 1, "maxItems": 64},
+            },
+        },
+    ),
+    ToolSpec(
+        "git_commit",
+        "Create an explicitly approved local Git commit. This tool never pushes.",
+        {
+            "type": "object",
+            "required": ["message"],
+            "properties": {
+                "message": {"type": "string", "minLength": 1, "maxLength": 200},
+            },
+        },
+    ),
+)
+
+
 WEB_RESEARCH_TOOL_SPECS: tuple[ToolSpec, ...] = (
     ToolSpec(
         "web_search",
@@ -1312,7 +1338,86 @@ class TestRunTools:
                 text = ""
             if "pytest" in text or "[tool.pytest" in text:
                 return "python-pytest"
+            return "python-unittest"
         return "python-unittest"
+
+
+class GitCommitTools:
+    """Approval-gated local Git staging and commit tools. Never pushes."""
+
+    def __init__(
+        self,
+        root: str | Path,
+        *,
+        approval_callback: ApprovalCallback | None = None,
+        runner: Callable[..., subprocess.CompletedProcess] | None = None,
+    ) -> None:
+        self.root = Path(root).resolve()
+        if approval_callback is not None and not callable(approval_callback):
+            raise ToolError("approval_callback must be callable or None")
+        self.approval_callback = approval_callback
+        self.runner = runner or subprocess.run
+
+    @property
+    def specs(self) -> tuple[ToolSpec, ...]:
+        return GIT_COMMIT_TOOL_SPECS if self.approval_callback is not None else ()
+
+    def call(self, name: str, arguments: Mapping[str, object] | None = None) -> ToolResult:
+        if name in {"git.add", "git_add"}:
+            return self.add(dict(arguments or {}))
+        if name in {"git.commit", "git_commit"}:
+            return self.commit(dict(arguments or {}))
+        return ToolResult(name=name, ok=False, error="unknown tool")
+
+    def add(self, args: Mapping[str, object]) -> ToolResult:
+        try:
+            paths = _git_add_paths(args.get("paths"))
+        except ToolError as exc:
+            return ToolResult(name="git.add", ok=False, error=str(exc))
+        details = {"paths": list(paths), "argv": ["git", "add", "--", *paths], "cwd": "."}
+        if self.approval_callback is None or self.approval_callback("git.add", details) is not True:
+            return ToolResult(name="git.add", ok=False, error="approval denied")
+        return self._run_git("git.add", ("git", "add", "--", *paths), extra={"paths": list(paths)})
+
+    def commit(self, args: Mapping[str, object]) -> ToolResult:
+        try:
+            message = _git_commit_message(args.get("message"))
+        except ToolError as exc:
+            return ToolResult(name="git.commit", ok=False, error=str(exc))
+        details = {"message": message, "argv": ["git", "commit", "-m", message], "cwd": "."}
+        if self.approval_callback is None or self.approval_callback("git.commit", details) is not True:
+            return ToolResult(name="git.commit", ok=False, error="approval denied")
+        return self._run_git("git.commit", ("git", "commit", "-m", message), extra={"message": message})
+
+    def _run_git(self, name: str, argv: Sequence[str], *, extra: Mapping[str, object]) -> ToolResult:
+        try:
+            completed = self.runner(
+                list(argv),
+                cwd=self.root,
+                shell=False,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                timeout=120,
+                check=False,
+            )
+        except (FileNotFoundError, OSError, subprocess.TimeoutExpired) as exc:
+            return ToolResult(name=name, ok=False, error=f"git command failed: {type(exc).__name__}")
+        output = {
+            **dict(extra),
+            "argv": list(argv),
+            "exit_code": completed.returncode,
+            "stdout": completed.stdout[:_MAX_OUTPUT_CHARS],
+            "stderr": completed.stderr[:_MAX_OUTPUT_CHARS],
+            "truncated": len(completed.stdout) > _MAX_OUTPUT_CHARS or len(completed.stderr) > _MAX_OUTPUT_CHARS,
+        }
+        return ToolResult(
+            name=name,
+            ok=completed.returncode == 0,
+            output=output,
+            error=None if completed.returncode == 0 else "git command returned a non-zero exit code",
+        )
 
 
 def _bounded_int(value: object, field_name: str, minimum: int, maximum: int) -> int:
@@ -1340,6 +1445,33 @@ def _optional_test_target(value: object) -> str | None:
     return normalized
 
 
+def _git_add_paths(value: object) -> tuple[str, ...]:
+    if isinstance(value, (str, bytes)) or not isinstance(value, Sequence) or not value:
+        raise ToolError("paths must be a non-empty list of relative paths")
+    if len(value) > 64:
+        raise ToolError("paths must contain at most 64 entries")
+    paths: list[str] = []
+    for item in value:
+        try:
+            path = normalize_scoped_path(item, "path")
+        except WorkspaceError as exc:
+            raise ToolError(str(exc)) from exc
+        if path not in paths:
+            paths.append(path)
+    return tuple(paths)
+
+
+def _git_commit_message(value: object) -> str:
+    if not isinstance(value, str):
+        raise ToolError("message must be a string")
+    message = " ".join(value.strip().split())
+    if not message:
+        raise ToolError("message must be non-empty")
+    if len(message) > 200:
+        raise ToolError("message must be at most 200 characters")
+    return message
+
+
 def _normalize_argv(value: object) -> tuple[str, ...]:
     if not isinstance(value, Sequence) or isinstance(value, (str, bytes)) or not value:
         raise ToolError("argv must be a non-empty list of strings")
@@ -1353,6 +1485,8 @@ __all__ = [
     "CompositeToolExecutor",
     "CONTROLLED_TOOL_SPECS",
     "ControlledWorkspaceTools",
+    "GIT_COMMIT_TOOL_SPECS",
+    "GitCommitTools",
     "READ_ONLY_TOOL_SPECS",
     "ReadOnlyWorkspaceTools",
     "ToolError",

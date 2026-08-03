@@ -1750,6 +1750,18 @@ class _InteractiveApproval:
                     self.stdout.write(f"  {item}\n")
             self.stdout.write(f"Working directory: {details.get('cwd', '.')}\n")
             self.stdout.write(f"Timeout: {details.get('timeout_seconds', '')} seconds\n")
+        elif operation == "git.add":
+            self.stdout.write("\nGit staging requested by the model.\n")
+            paths = details.get("paths", ())
+            if isinstance(paths, Sequence) and not isinstance(paths, (str, bytes)):
+                self.stdout.write("Paths:\n")
+                for path in paths:
+                    self.stdout.write(f"  {path}\n")
+            self.stdout.write("This stages files locally only; it does not commit or push.\n")
+        elif operation == "git.commit":
+            self.stdout.write("\nGit commit requested by the model.\n")
+            self.stdout.write(f"Message: {details.get('message', '')}\n")
+            self.stdout.write("This creates a local commit only; it does not push.\n")
         elif operation.startswith("browser."):
             self.stdout.write("\nBrowser action requested by the model.\n")
             self.stdout.write(f"Operation: {operation}\n")

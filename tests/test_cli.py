@@ -961,7 +961,7 @@ class CliTests(unittest.TestCase):
 
     def test_interactive_approval_shows_shell_and_patch_requests(self):
         stdout = io.StringIO()
-        approval = cli._InteractiveApproval(io.StringIO("yes\nyes\nyes\n"), stdout)
+        approval = cli._InteractiveApproval(io.StringIO("yes\nyes\nyes\nyes\nyes\n"), stdout)
 
         shell_allowed = approval(
             "shell.exec",
@@ -988,10 +988,20 @@ class CliTests(unittest.TestCase):
                 "timeout_seconds": 60,
             },
         )
+        git_add_allowed = approval(
+            "git.add",
+            {"paths": ["src/agentx/cli.py"], "argv": ["git", "add", "--", "src/agentx/cli.py"]},
+        )
+        git_commit_allowed = approval(
+            "git.commit",
+            {"message": "Fix tests", "argv": ["git", "commit", "-m", "Fix tests"]},
+        )
 
         self.assertTrue(shell_allowed)
         self.assertTrue(patch_allowed)
         self.assertTrue(test_allowed)
+        self.assertTrue(git_add_allowed)
+        self.assertTrue(git_commit_allowed)
         rendered = stdout.getvalue()
         self.assertIn("Shell command requested", rendered)
         self.assertIn("Argv:", rendered)
@@ -1003,6 +1013,11 @@ class CliTests(unittest.TestCase):
         self.assertIn("Test run requested", rendered)
         self.assertIn("Profile: python-unittest", rendered)
         self.assertIn("Target: tests.test_cli", rendered)
+        self.assertIn("Git staging requested", rendered)
+        self.assertIn("This stages files locally only", rendered)
+        self.assertIn("Git commit requested", rendered)
+        self.assertIn("Message: Fix tests", rendered)
+        self.assertIn("it does not push", rendered)
 
     def test_interactive_approval_treats_escape_as_cancelled(self):
         stdout = io.StringIO()

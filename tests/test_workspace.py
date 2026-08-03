@@ -220,6 +220,16 @@ class PatchValidationTests(unittest.TestCase):
         self.assertEqual((), result.paths)
         self.assertIn("patch_no_target_paths", [event.code for event in result.events])
 
+    def test_empty_patch_is_accepted_as_no_patch(self):
+        result = validate_patch_paths(
+            "",
+            allowed_paths=["src/app.py"],
+        )
+
+        self.assertTrue(result.accepted)
+        self.assertEqual((), result.paths)
+        self.assertEqual((), result.events)
+
     def test_malformed_patch_without_hunk_is_rejected(self):
         patch = """diff --git a/src/app.py b/src/app.py
 --- a/src/app.py
