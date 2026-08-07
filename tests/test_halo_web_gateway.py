@@ -23,6 +23,15 @@ gateway = _load_gateway_module()
 
 
 class HaloWebGatewayTests(unittest.TestCase):
+    def test_chat_textarea_enter_submits_and_shift_enter_keeps_newline(self):
+        page = gateway.PAGE.decode("utf-8")
+
+        self.assertIn("Enter to send, Shift+Enter for a newline", page)
+        self.assertIn("prompt.addEventListener('keydown'", page)
+        self.assertIn("e.key==='Enter'&&!e.shiftKey&&!e.isComposing", page)
+        self.assertIn("e.preventDefault();submitPrompt();", page)
+        self.assertIn("form.requestSubmit", page)
+
     def test_web_tools_are_advertised_to_vllm(self):
         tools = {item["function"]["name"]: item for item in gateway.WEB_TOOL_SPECS}
         self.assertTrue({"web_search", "web_fetch"}.issubset(tools))
