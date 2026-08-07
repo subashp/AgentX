@@ -7,7 +7,8 @@ local browser UI, the `agentx` coding CLI, and a gateway for other machines.
 The default deployment keeps every service on your Halo machine:
 
 - **Web UI:** a private, persistent chat interface at `http://127.0.0.1:8000/`.
-- **AgentX CLI:** a coding assistant that can inspect a selected workspace.
+- **AgentX CLI:** a coding assistant that can inspect a selected workspace and,
+  in private-provider execute mode, apply user-approved patches and test runs.
 - **OpenAI-compatible API:** `http://127.0.0.1:8000/v1` for local programs.
 
 ## Get started on a Halo machine
@@ -92,10 +93,10 @@ The detailed host, model, and troubleshooting reference is in
 ### Use AgentX as a coding agent
 
 AgentX is provider-neutral and privacy-first: it limits what a model can see
-before a request leaves the CLI. The private Qwen provider has bounded,
-read-only workspace tools for listing files, reading files, literal search,
-Git status, scoped diffs, memory, web research, browser automation, and
-bounded sub-agents. Slash commands complete in the installed CLI.
+before a request leaves the CLI. Normal private-provider chat is read-only. In
+that mode the model can use bounded tools for workspace tree/read/search, Git
+status, scoped diffs, memory, web research, optional browser automation, and
+read-only sub-agents. Slash commands complete in the installed CLI.
 
 Common interactive commands:
 
@@ -110,11 +111,13 @@ Common interactive commands:
 /quit
 ```
 
-Normal private-provider chat is read-only. `/execute <task>` adds approved
-`workspace_patch`, `test_run`, and `shell_exec`, shows progress, and records
-limits plus stop reason. Git staging/commit tools are explicit and never push.
-The model can request up to ten read-only sub-agents; children cannot edit,
-shell out, commit, or create grandchildren.
+`/execute <task>` is the live autonomous edit path for the
+`private-openai-compatible` provider. It adds approval-gated `workspace_patch`,
+`test_run`, and `shell_exec`, shows tool progress, and records limits plus stop
+reason. It does not commit or push. Approval-gated local Git add/commit tool
+primitives exist for a future explicit commit UX, but this branch does not
+expose a public `/commit` command yet. The model can request up to ten read-only
+sub-agents; children cannot edit, shell out, commit, or create grandchildren.
 
 AgentX supports both standard OpenAI `tool_calls` and Qwen/vLLM raw
 `<tool_call>{...}</tool_call>` blocks. Malformed or mixed prose/tool output is
@@ -209,8 +212,10 @@ Inspect the external settings location with `agentx config path`. The command
 ### Other providers and command-line use
 
 When installed and authenticated, Codex, Claude Code, and Kiro CLI remain
-available alongside local Qwen. Provider selection is policy-filtered before
-context is sent. Common non-interactive commands are:
+available alongside local Qwen. These providers use their native CLI surfaces;
+AgentX does not inject its private-provider tool loop into them. Provider
+selection is policy-filtered before context is sent. Common non-interactive
+commands are:
 
 ```bash
 agentx providers list
@@ -220,9 +225,10 @@ agentx plan --provider private-openai-compatible --context README.md \
 agentx --json providers list
 ```
 
-`fake-local` is a deterministic offline provider for testing. Non-interactive
-live execute/apply mode is not enabled; use interactive `/execute <task>` for
-approved private-provider patch, test and shell tools.
+`fake-local` is a deterministic offline provider for testing. The top-level
+`agentx execute` command is currently a deterministic fake/fixture path only;
+use interactive `/execute <task>` for live private-provider patch, test, and
+shell tools.
 
 ### Models and operations
 
